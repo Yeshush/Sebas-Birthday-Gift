@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Output files
+results/
+filtered_results/
+*.csv
+*.json
+*.html
+
+# macOS
+.DS_Store
+
+# Firebase
+firebase-debug.log
+
+# Env
+.env
+.env.local
