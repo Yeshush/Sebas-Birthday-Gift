@@ -15,6 +15,7 @@ Starten:
 
 import json
 import queue
+import re
 import sys
 import threading
 import webbrowser
@@ -495,7 +496,8 @@ def index():
 
 @app.route("/scrape")
 def scrape_sse():
-    location     = (request.args.get("location") or "winterthur").strip() or "winterthur"
+    _raw_location = (request.args.get("location") or "winterthur").strip()
+    location = re.sub(r'[^a-z0-9\-]', '', _raw_location.lower())[:50] or "winterthur"
     max_pages_s  = (request.args.get("max_pages") or "").strip()
     max_pages    = int(max_pages_s) if max_pages_s.isdigit() else None
 
@@ -602,9 +604,13 @@ def scrape_sse():
 @app.route("/results/<path:filename>")
 def serve_result(filename):
     filepath = FILT_DIR / filename
-    if not filepath.exists():
+    resolved = filepath.resolve()
+    # Guard against path traversal (e.g. /results/../../server.py)
+    if not str(resolved).startswith(str(FILT_DIR.resolve())):
+        return "Zugriff verweigert", 403
+    if not resolved.exists():
         return "Datei nicht gefunden", 404
-    return send_file(filepath.resolve())
+    return send_file(resolved)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

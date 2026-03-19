@@ -1,0 +1,208 @@
+# ─── JobScraper Filter-Konfiguration ─────────────────────────────────────────
+# Diese Datei steuert welche Jobs gezeigt und welche ausgeblendet werden.
+# Anpassungen hier wirken sich sofort auf den nächsten Scrape aus.
+
+[filter]
+# Minimales Pensum in Prozent (0-100). Jobs unter diesem Wert werden gefiltert.
+min_workload_percent = 80
+
+# ─── Ausschluss-Keywords ─────────────────────────────────────────────────────
+# Jobs deren Titel eines dieser Keywords enthält werden AUSGEBLENDET.
+
+[filter.exclude_keywords]
+medizin_pflege = [
+    "arzt", "ärztin", "medizin", "pflege", "pflegefach", "spitex",
+    "chirurgie", "radiologie", "neurochirurgie", "pädiatrie", "urologie",
+    "facharzt", "oberarzt", "assistenzarzt", "ergotherap", "psycholog",
+    "nachsorge", "sozialberatung",
+]
+technik_ingenieur = [
+    "ingenieur", "software", "entwickler", "programm",
+    "cnc", "elektroniker", "elektroinstallateur",
+    "polymechaniker", "polymech", "mechatroniker",
+    "embedded", "firmware", "maschineningenieur",
+    "produktionsmechaniker", "automatikmonteur", "automatiker",
+    "metallbauer", "sanitärinstallateur",
+    "zimmermann", "zimmerin", "montage-elektriker",
+    "techniker / mechaniker für feinmechanische",
+]
+chemie_labor = [
+    "chemiker", "laborant", " qc ", "compliance manager",
+]
+finanzen_recht = [
+    "treuhänder", "buchhalter", "buchhal", "steuer",
+    "anwalt", "jurist", "notar",
+    "underwriter", "risk manager",
+]
+bau_architektur = [
+    "architekt", "bauzeichner", "bauingenieur",
+    "bauleiter", "bauleitende", "baupolier",
+]
+it_data = [
+    "bi data", "data engineer", "rpa", "applikation", "erp consultant",
+    "it perimeter", "ict infrastructure", "security consultant",
+    "it allrounder", "it service",
+]
+bildung = [
+    "unterassistent", "berufsschullehrperson", "professor",
+]
+behoerde_sicherheit = [
+    "polizist", "polizei",
+]
+hr_recruiting = [
+    "recruiter", "recruiting consultant",
+]
+planung_haustechnik = [
+    "sanitärplan", "heizung", "haustechnik",
+    "disponent strassentransport",
+]
+kosmetik = [
+    "kosmetiker",
+]
+gastro_fuehrung = [
+    "spezialkoch", "küchenchef", "leitung küche", "betriebsleiter",
+]
+fuehrungspositionen = [
+    "teamleiter", "teamlead", "teamleader",
+    "standortleiter", "gebietsverkaufsleiter",
+    "verkaufsleiter", "abteilungsleiter", "produktionsleiter",
+    "facility management",
+]
+fahrzeuge = [
+    "lkw-chauffeur", "chauffeur kat. c", "chauffeur/springer",
+]
+fachberufe = [
+    "gärtner efz", "maler",
+    "schreiner", "zimmerer",
+    "moto", "motorrad",
+]
+wissenschaft = [
+    "wissenschaftl",
+]
+ausbildungsstellen = [
+    "lehrstelle", "lernende", "lernender",
+]
+praktika = [
+    "praktikum", "praktikant",
+]
+voluntariat = [
+    "freiwillige",
+]
+saisonal = [
+    "sommersaison", "badangestellte",
+]
+immobilien = [
+    "immobilienmakler", "immobilienbewirtschafter",
+]
+
+# ─── Manuell ausgeschlossene Titel ────────────────────────────────────────────
+# Jobs die exakt diese Titel-Teilzeichenketten enthalten werden ausgeblendet.
+# Nützlich für spezifische Fälle die von den Keywords nicht abgedeckt werden.
+
+[filter.manual_exclude_titles]
+titles = [
+    "fachperson operationslagerung",
+    "motorrad aufbereiter",
+    "motorrad verkaufsberater",
+    "autoersatzteileverkäufer",
+    "kundendienstberater werkstatt",
+    "detailhandelsfachperson efz, autoteile",
+    "verkäufer ersatzteile",
+    "fachberatung ausstellung sanitär",
+    "verkäufer*in hlkks",
+    "projektleiter elektro",
+    "projektleiter/in privatkundenverkauf",
+    "badplanung",
+    "frischefachberatung",
+    "kaufm. sachbearbeiter",
+    "sachbearbeiter:in kundendienst",
+    "sachbearbeiter kundendienst",
+    "digitale kundenberatung mit pioniergeist – (senior)",
+    "immobilienvermarkter",
+    "it allrounder mit support",
+    "werkstattmitarbeiter",
+    "mitarbeiter:in facility",
+    "mitarbeiter:in abgleich und löten",
+    "produktionsplaner",
+    "sachbearbeiter:in lieferantenqualit",
+    "mitarbeiter/in treuhand",
+    "kaufmännische:r mitarbeiter",
+    "mitarbeiterin backoffice",
+    "trading assistant",
+    "abteilungsleiter sensorproduktion",
+    "kkw-revisionsmitarbeiter",
+    "mitarbeiter/in disposition",
+    "vorarbeiter/-in holzkistenproduktion",
+    "fachfrau:mann hotellerie-hauswirtschaft efz (fortsetzungslehre",
+    "lernende:r detailhandelsfachmann",
+    "lernende logistikerin",
+    "lernende in systemgastronomie",
+    "systemgastronomiepraktiker",
+    "systemgastronomiefachfrau:mann",
+    "detailhandelsfachfrau:mann efz «gestalten von einkaufserlebnissen»",
+    "detailhandelsfachfrau:mann / -assistent",
+    "lehrstelle als detailhandelsfachfrau",
+    "fachperson hauswirtschaft efz 80%",
+    "chauffeur / chauffeuse kat. c",
+    "chauffeur kat. c/e",
+    "lkw-chauffeur",
+    "kassiererin (w/m/d)",
+    "aushilfe an warentagen",
+    "verkaufsberaterin non food (w/m/d)",
+    "praktikum hauswirtschaft",
+    "praktikum küche",
+    "mitarbeiter*in hauswirtschaft 50",
+    "fachfrau/-mann hauswirtschaft efz (60 - 80%)",
+    "lagerist / chauffeur",
+    "servicemitarbeiter/in sommersaison",
+    "aushilfe badangestellte",
+    "aushilfe reinigung / office",
+    "aushilfe service",
+    "aushilfe event",
+    "fachkraft reinigung 100%",
+    "aspirant",
+    "security consultant",
+]
+
+# ─── Inklusions-Keywords ─────────────────────────────────────────────────────
+# Jobs müssen mindestens eines dieser Keywords im Titel haben um GEZEIGT zu werden.
+
+[filter.include_keywords]
+detailhandel = [
+    "detailhandel", "filial", "laden", "shop",
+    "markt", "supermarkt", "lebensmittel",
+    "migros", "coop", "volg", "otto",
+    "kassierer", "kassier", "kassiererin",
+    "warenbewirtschaft", "warenverräumer",
+]
+verkauf_kundenkontakt = [
+    "verkauf", "verkäufer", "verkaufsmitarbeiter",
+    "verkaufsberater", "verkaufsspezialist",
+    "kundenberater", "kundendienst", "kundenbetreuung",
+    "kundenservice", "kundendienstberater",
+    "assistenz verkauf", "sales assistant",
+]
+lager_logistik = [
+    "lager", "lagerist", "lagerplatz",
+    "logistik", "logistiker",
+    "magazin", "kommissionier",
+    "auslieferung", "betriebsunterhalt",
+    "kurierdienst", "postdienst",
+]
+gastronomie_service = [
+    "gastro", "restaurant", "café", "cafe",
+    "servicemitarbeiter", "servicefachangestellte",
+    "bar", "crew",
+    "küche", "koch", "köchin",
+]
+hauswirtschaft_reinigung = [
+    "hauswirtschaft", "reinigung", "reiniger",
+]
+einstiegsstellen = [
+    "mitarbeiter", "mitarbeiterin",
+    "hilfskraft", "aushilfe", "allrounder",
+    "telemarketing", "frontoffice",
+]
+quereinstieg = [
+    "quereinstieg", "quereinsteiger",
+]
