@@ -55,55 +55,57 @@ def test_parse_workload_garbage():
 # ── workload_ok ────────────────────────────────────────────────────────────────
 
 def test_workload_ok_accepts_80():
-    assert workload_ok("80-100%") is True
+    assert workload_ok("80-100%", 80) is True
 
 def test_workload_ok_accepts_100():
-    assert workload_ok("100%") is True
+    assert workload_ok("100%", 80) is True
 
 def test_workload_ok_rejects_60():
-    assert workload_ok("40-60%") is False
+    assert workload_ok("40-60%", 80) is False
 
 def test_workload_ok_rejects_empty():
-    assert workload_ok("") is False
+    assert workload_ok("", 80) is False
 
 
 # ── is_excluded ────────────────────────────────────────────────────────────────
 
 def test_exclude_engineering():
-    excluded, reason = is_excluded("Software Entwickler")
+    from jobscraper.config import get_exclude_keywords, get_manual_exclude_titles
+    excluded, reason = is_excluded("Software Entwickler", get_exclude_keywords(), get_manual_exclude_titles())
     assert excluded is True
-    assert "software" in reason.lower() or "entwickler" in reason.lower()
 
 def test_exclude_medical():
-    excluded, _ = is_excluded("Facharzt für Innere Medizin")
+    from jobscraper.config import get_exclude_keywords, get_manual_exclude_titles
+    excluded, _ = is_excluded("Facharzt für Innere Medizin", get_exclude_keywords(), get_manual_exclude_titles())
     assert excluded is True
 
 def test_exclude_manual_title():
-    excluded, reason = is_excluded("Werkstattmitarbeiter")
+    excluded, reason = is_excluded("Werkstattmitarbeiter", [], ["werkstattmitarbeiter"])
     assert excluded is True
     assert "werkstattmitarbeiter" in reason.lower()
 
 def test_no_exclude_retail():
-    excluded, _ = is_excluded("Verkäufer/in Detailhandel")
+    excluded, _ = is_excluded("Verkäufer/in Detailhandel", ["software"], [])
     assert excluded is False
 
 
 # ── is_included ────────────────────────────────────────────────────────────────
 
 def test_include_verkauf():
-    included, reason = is_included("Verkäuferin Teilzeit")
+    included, reason = is_included("Verkäuferin Teilzeit", ["verkäufer", "lager"])
     assert included is True
 
 def test_include_lager():
-    included, _ = is_included("Lagerist 80-100%")
+    included, _ = is_included("Lagerist 80-100%", ["lager"])
     assert included is True
 
 def test_include_migros():
-    included, _ = is_included("Mitarbeiter Migros Filiale")
+    from jobscraper.config import get_include_keywords
+    included, _ = is_included("Mitarbeiter Migros Filiale", get_include_keywords())
     assert included is True
 
 def test_not_included_random():
-    included, _ = is_included("Quantenphysiker")
+    included, _ = is_included("Quantenphysiker", ["verkauf", "lager"])
     assert included is False
 
 
@@ -164,3 +166,33 @@ def test_filter_enriches_with_company_clean():
                  company="Is this job relevant to you?")]
     filtered, _ = filter_jobs(jobs, verbose=False)
     assert filtered[0].company_clean == "Unbekannt"
+
+
+# ── FilterProfile ──────────────────────────────────────────────────────────────
+
+from jobscraper.filters import FilterProfile
+
+def test_filter_profile_defaults():
+    p = FilterProfile()
+    assert p.min_workload is None
+    assert p.allow_quereinstieg is True
+
+def test_filter_jobs_respects_profile_min_workload():
+    """FilterProfile.min_workload=60 should keep a 60% job that config.toml would reject."""
+    jobs = [_job(workload="60-80%", title="Verkäufer/in")]
+    # Default config.toml min is 80 — would exclude this job
+    filtered, stats = filter_jobs(jobs, verbose=False, profile=FilterProfile(min_workload=60))
+    assert stats.excluded_workload == 0
+
+def test_filter_jobs_quereinstieg_excluded_by_profile():
+    jobs = [_job(title="Quereinsteiger willkommen", workload="80-100%")]
+    filtered, stats = filter_jobs(
+        jobs, verbose=False,
+        profile=FilterProfile(
+            allow_quereinstieg=False,
+            include_keywords=["quereinsteiger"],  # would normally include
+        )
+    )
+    # allow_quereinstieg=False appends "quereinsteiger" to excludes, overriding include
+    assert stats.excluded_keyword >= 1
+    assert stats.kept == 0

@@ -31,3 +31,4 @@ dist/
 *.spec
 instance/
 *.db
+.worktrees/

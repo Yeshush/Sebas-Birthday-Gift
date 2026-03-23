@@ -4,47 +4,48 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-JobScraper is a CLI web scraper for [jobs.ch](https://www.jobs.ch) (a Swiss job board). It scrapes job listings by location, extracts structured data, and exports results to CSV and JSON.
+JobScraper is a FastAPI web application that scrapes jobs from [jobs.ch](https://www.jobs.ch) (a Swiss job board). Users log in, trigger scrapes by location, and browse filtered results stored in a database.
 
-## Running the Scraper
+## Running the Application
+
+### Web server (local)
 
 ```bash
-# Activate virtual environment first
 source .venv/bin/activate
-
-# Basic usage (defaults to winterthur, all pages, current directory output)
-python3 JobScraper.py
-
-# With options
-python3 JobScraper.py --location zurich --max-pages 5 --output-dir ./results
-
-# Short flags
-python3 JobScraper.py -l bern -m 3 -o ./output
+pip install -e .
+uvicorn jobscraper.server:app --reload --port 5001
+# → http://localhost:5001
 ```
 
-## Dependencies
+### Tests
 
-Dependencies are not tracked in a requirements file. The venv at `.venv/` uses Python 3.13. External packages required:
-- `requests` — HTTP client
-- `beautifulsoup4` — HTML parsing
-- `tqdm` — progress bars
-
-Install with: `pip install requests beautifulsoup4 tqdm`
+```bash
+source .venv/bin/activate
+pytest tests/ -v
+# Single test:
+pytest tests/test_filters.py::test_filter_profile_defaults -v
+```
 
 ## Architecture
 
-Single-file application (`JobScraper.py`) organized into logical sections:
+### Two-layer structure
 
-- **Configuration (lines 16–33):** Constants for base URL, headers, delay, and items-per-page.
-- **HTML Parsers (lines 36–99):** `parse_total_count()` extracts total job count; `parse_jobs()` extracts individual job cards. Uses `data-cy` attributes as primary selectors (stable testing hooks).
-- **HTTP Helper (lines 102–113):** `fetch_page()` wraps requests with error handling, returns a BeautifulSoup object or None.
-- **Export (lines 116–134):** `save_csv()` and `save_json()` write timestamped output files.
-- **Scraper (lines 139–205):** `scrape()` orchestrates pagination, deduplication by UUID (sponsored jobs repeat), and polite 1-second delays.
-- **CLI (lines 210–245):** `main()` via argparse; prints a preview table of the first 20 results.
+| Layer | Files | Role |
+|-------|-------|------|
+| Scraper | `src/jobscraper/scraper.py`, `src/jobscraper/parser.py` | Fetches and parses jobs.ch HTML |
+| Filter | `src/jobscraper/filters.py` | 4-stage pipeline (workload → exclude → include → dedup) |
+| Models | `src/jobscraper/models.py` | Pydantic `Job` / `FilterStats` |
+| DB | `src/jobscraper/db.py` | SQLAlchemy 2.0 async models (UserRow, ProfileRow, SearchHistoryRow, JobRow) |
+| Server | `src/jobscraper/server.py` | FastAPI app: auth, history API, SSE scrape endpoint, static SPA serving |
+| Config | `src/jobscraper/config.py` + `config.toml` | Global filter defaults (keywords, min workload) |
+| Frontend | `frontend/src/` | React SPA (Vite build → `frontend/dist/`) |
 
-## Key Implementation Notes
+### Key implementation notes
 
-- Selectors use `data-cy` attributes (e.g., `[data-cy="serp-item"]`, `[data-cy="job-link"]`) — prefer these when updating parsers.
-- Deduplication is UUID-based; sponsored/promoted jobs can appear on multiple pages.
-- Output filenames are timestamped: `jobs_{location}_{YYYYMMDD_HHMMSS}.{csv,json}`.
-- No `.gitignore` exists — avoid committing venv or output files.
+- **Deployment:** Dockerfile uses `CMD ["sh", "-c", "uvicorn jobscraper.server:app --host 0.0.0.0 --port ${PORT:-8080}"]` — the `sh -c` form expands `$PORT` before uvicorn receives it (fixes Railway deployment crash).
+- **Database:** Postgres on Railway (`DATABASE_URL` env var), SQLite locally (default `sqlite+aiosqlite:///./jobscraper.db`).
+- **Auth:** JWT HS256, 7-day expiry. `JWT_SECRET_KEY` env var required in production.
+- **SSE scrape:** `/scrape?location=&token=` — token in query param because `EventSource` cannot set headers.
+- **FilterProfile:** `filter_jobs()` accepts an optional `FilterProfile` dataclass as its 4th positional argument. `None` fields fall back to `config.toml` defaults. Pass with `run_in_executor` as: `await loop.run_in_executor(None, filter_jobs, raw_jobs, False, None, profile)`.
+- **Frontend field mapping:** API serializes `url → link` and `published → date` to match `Dashboard.jsx`.
+- **Seeded user:** `seba` / `seba123` (EFZ profile) is seeded on first startup.
