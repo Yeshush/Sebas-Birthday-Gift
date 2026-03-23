@@ -24,3 +24,5 @@ firebase-debug.log
 build/
 dist/
 *.spec
+instance/
+*.db

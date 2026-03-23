@@ -8,7 +8,7 @@ Ergebnisse automatisch.
 
 Starten:
     source .venv/bin/activate
-    pip install flask
+    pip install -r requirements.txt
     python3 server.py
     → http://localhost:5001
 """
@@ -20,10 +20,13 @@ import sys
 import threading
 import webbrowser
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, Response, redirect, request, send_file
+from flask import Flask, Response, redirect, request, send_file, jsonify
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
 
 # Import scraper functions directly
 BASE_DIR = Path(__file__).parent.absolute()
@@ -31,471 +34,157 @@ sys.path.insert(0, str(BASE_DIR))
 from JobScraper import (
     scrape, filter_jobs, save_csv, save_json, generate_html,
 )
+from database import db, User, Profile, SearchHistory
+
+load_dotenv()
 
 app = Flask(__name__)
 
+# -- App Configuration --
+# Use SQLite locally by default, or DATABASE_URL if on Railway
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///jobscraper.db')
+if app.config['SQLALCHEMY_DATABASE_URI'].startswith("postgres://"):
+    app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace("postgres://", "postgresql://", 1)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'dev-secret-key-change-me')
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=7)
+
+db.init_app(app)
+jwt = JWTManager(app)
+
 # Output directories should be relative to the CURRENT WORKING DIRECTORY
-# where the user runs the .exe, NOT the temporary bundle directory.
 FILT_DIR = Path("filtered_results")
 RAW_DIR  = Path("results")
 _run_lock = threading.Lock()
 
+# Auto-create tables and seed "seba" user
+with app.app_context():
+    db.create_all()
+    # Seed user "seba"
+    if not User.query.filter_by(username='seba').first():
+        seba = User(username='seba')
+        seba.set_password('seba123') # Default password for the requested Seba user
+        db.session.add(seba)
+        db.session.commit()
+        
+        # Add profile for seba
+        seba_profile = Profile(
+            user_id=seba.id,
+            education_level='EFZ',
+            min_workload=80,
+            allow_quereinstieg=True
+        )
+        seba_profile.set_interests_list(["detailhandel", "verkauf", "lager", "gastro"])
+        db.session.add(seba_profile)
+        db.session.commit()
+        print("✅ Seeded user 'seba' into database.")
 
-# ── Start-Seite ───────────────────────────────────────────────────────────────
-START_HTML = """<!DOCTYPE html>
-<html lang="de">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JobScraper — Starte die Suche</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,700;0,9..144,900;1,9..144,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --cream:#F5F0E8; --ink:#1A1510; --rust:#C4502A; --sage:#5A7A5A;
-    --gold:#C9974A; --sand:#E8DEC8; --mist:#D4CFC5; --card:#FDFAF4;
-  }
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--cream);color:var(--ink);font-family:'DM Sans',sans-serif;
-       font-weight:300;min-height:100vh;display:flex;flex-direction:column}
+# ── API Routes (Authentication) ───────────────────────────────────────────────
 
-  /* grain */
-  body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:999;opacity:.5;
-    background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E")}
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    if not data or not data.get('username') or not data.get('password'):
+        return jsonify({"msg": "Username and password required"}), 400
+        
+    user = User.query.filter_by(username=data.get('username')).first()
+    if not user or not user.check_password(data.get('password')):
+        return jsonify({"msg": "Bad username or password"}), 401
+        
+    access_token = create_access_token(identity=str(user.id))
+    return jsonify(access_token=access_token, username=user.username)
 
-  header{padding:4rem 5vw 3rem;border-bottom:1px solid var(--mist)}
-  .eyebrow{font-size:.72rem;letter-spacing:.25em;text-transform:uppercase;
-           color:var(--rust);font-weight:500;margin-bottom:1rem;
-           animation:fadeUp .5s ease forwards}
-  h1{font-family:'Fraunces',serif;font-size:clamp(2.5rem,7vw,6rem);
-     font-weight:900;line-height:.95;letter-spacing:-.03em;
-     animation:fadeUp .6s ease .1s both}
-  h1 em{font-style:italic;font-weight:300;color:var(--rust)}
-  .subtitle{margin-top:1.2rem;color:#6B6155;font-size:.95rem;
-            animation:fadeUp .6s ease .2s both}
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    
+    if not username or not password:
+        return jsonify({"msg": "Username and password required"}), 400
+        
+    if User.query.filter_by(username=username).first():
+        return jsonify({"msg": "Username already exists"}), 400
+        
+    new_user = User(username=username)
+    new_user.set_password(password)
+    db.session.add(new_user)
+    db.session.commit()
+    
+    # Create empty profile
+    new_profile = Profile(user_id=new_user.id)
+    db.session.add(new_profile)
+    db.session.commit()
+    
+    access_token = create_access_token(identity=str(new_user.id))
+    return jsonify(access_token=access_token, username=new_user.username), 201
 
-  /* form card */
-  .card{background:var(--card);border:1px solid var(--mist);border-radius:6px;
-        padding:2.5rem;max-width:520px;margin:3rem 5vw;
-        animation:fadeUp .6s ease .3s both;box-shadow:0 4px 24px rgba(26,21,16,.06)}
-  .field{margin-bottom:1.5rem}
-  .field label{display:block;font-size:.72rem;letter-spacing:.2em;
-               text-transform:uppercase;color:var(--rust);font-weight:500;
-               margin-bottom:.5rem}
-  .field input{width:100%;padding:.65rem 1rem;border:1px solid var(--mist);
-               background:var(--cream);border-radius:4px;font-family:'DM Sans',sans-serif;
-               font-size:.95rem;color:var(--ink);outline:none;transition:border-color .2s}
-  .field input:focus{border-color:var(--rust)}
-  .field .hint{font-size:.72rem;color:#9A8E82;margin-top:.35rem}
+@app.route('/api/me', methods=['GET'])
+@jwt_required()
+def me():
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    if not user:
+        return jsonify({"msg": "User not found"}), 404
+        
+    profile = user.profile
+    return jsonify({
+        "username": user.username,
+        "profile": {
+            "education_level": profile.education_level,
+            "min_workload": profile.min_workload,
+            "interests": profile.get_interests_list(),
+            "allow_quereinstieg": profile.allow_quereinstieg
+        }
+    })
 
-  #start-btn{width:100%;padding:1rem;background:var(--ink);color:var(--cream);
-             border:none;border-radius:4px;font-family:'Fraunces',serif;
-             font-size:1.15rem;font-weight:700;cursor:pointer;
-             transition:background .2s,transform .15s;letter-spacing:-.01em}
-  #start-btn:hover{background:var(--rust);transform:translateY(-2px)}
-  #start-btn:disabled{background:var(--mist);cursor:default;transform:none}
+@app.route('/api/history', methods=['GET'])
+@jwt_required()
+def history():
+    current_user_id = get_jwt_identity()
+    searches = SearchHistory.query.filter_by(user_id=current_user_id).order_by(SearchHistory.timestamp.desc()).all()
+    
+    return jsonify([{
+        "id": s.id,
+        "location": s.location,
+        "timestamp": s.timestamp.isoformat(),
+        "summary": json.loads(s.results_summary) if s.results_summary else {}
+    } for s in searches])
 
-  /* progress section */
-  #progress-section{display:none;max-width:620px;margin:0 5vw 4rem;
-                    animation:fadeUp .5s ease both}
-  .stage-row{display:flex;align-items:center;gap:1rem;margin-bottom:2rem}
-  .stage-icon{font-size:2.8rem;animation:wiggle 1.5s infinite}
-  .stage-info h2{font-family:'Fraunces',serif;font-size:1.6rem;font-weight:700;
-                 letter-spacing:-.02em}
-  .stage-info p{font-size:.8rem;color:#6B6155;margin-top:.2rem;letter-spacing:.05em;
-                text-transform:uppercase}
-
-  /* THE progress bar */
-  .track-wrap{position:relative;margin-bottom:.6rem}
-  .track{height:52px;background:var(--sand);border-radius:30px;overflow:visible;
-         border:2px solid var(--mist);position:relative}
-  .fill{height:100%;background:linear-gradient(90deg,var(--rust),var(--gold));
-        border-radius:28px;width:0%;transition:width .6s cubic-bezier(.4,0,.2,1);
-        position:relative}
-  .mascot{position:absolute;right:-22px;top:50%;transform:translateY(-50%);
-          font-size:2rem;filter:drop-shadow(0 2px 4px rgba(0,0,0,.2));
-          animation:bounce .6s infinite alternate}
-  .pct{position:absolute;right:.8rem;top:50%;transform:translateY(-50%);
-       font-family:'Fraunces',serif;font-size:1.1rem;font-weight:700;
-       color:var(--ink);pointer-events:none;mix-blend-mode:multiply}
-
-  .funny-msg{font-size:.9rem;color:var(--rust);font-style:italic;
-             min-height:1.4em;transition:opacity .4s;margin-bottom:1.2rem}
-
-  .stats-row{display:flex;gap:2rem;font-size:.78rem;color:#6B6155;
-             letter-spacing:.05em;text-transform:uppercase;margin-bottom:1.5rem}
-  .stats-row span{display:flex;align-items:center;gap:.4rem}
-
-  /* log */
-  .log-box{background:var(--ink);color:#9BE;font-family:monospace;font-size:.75rem;
-           border-radius:4px;padding:.8rem 1rem;max-height:120px;overflow-y:auto;
-           line-height:1.6;opacity:.85}
-  .log-box p{margin:0}
-
-  /* done card */
-  #done-section{display:none;max-width:520px;margin:0 5vw 4rem;
-                animation:fadeUp .5s ease both}
-  .done-card{background:var(--card);border:2px solid var(--sage);border-radius:6px;
-             padding:2rem;text-align:center}
-  .done-icon{font-size:3.5rem;margin-bottom:1rem;animation:pop .4s ease}
-  .done-card h2{font-family:'Fraunces',serif;font-size:1.6rem;font-weight:700;
-                margin-bottom:.5rem}
-  .done-card p{color:#6B6155;font-size:.9rem;margin-bottom:1.5rem}
-  .done-stats{display:flex;justify-content:center;gap:2.5rem;margin-bottom:1.5rem}
-  .done-stat strong{font-family:'Fraunces',serif;font-size:2rem;font-weight:700;
-                    display:block;color:var(--rust)}
-  .done-stat span{font-size:.68rem;letter-spacing:.15em;text-transform:uppercase;
-                  color:#9A8E82}
-  .view-btn{display:inline-block;padding:.7rem 2rem;background:var(--ink);
-            color:var(--cream);text-decoration:none;border-radius:100px;
-            font-family:'DM Sans',sans-serif;font-weight:500;font-size:.9rem;
-            transition:background .2s,transform .15s}
-  .view-btn:hover{background:var(--rust);transform:translateY(-2px)}
-  .reset-btn{margin-top:1rem;display:block;font-size:.75rem;color:#9A8E82;
-             cursor:pointer;background:none;border:none;text-decoration:underline}
-
-  footer{margin-top:auto;border-top:1px solid var(--mist);padding:1.2rem 5vw;
-         background:var(--sand);font-size:.72rem;color:#9A8E82;
-         display:flex;justify-content:space-between;align-items:center}
-  .footer-logo{font-family:'Fraunces',serif;font-size:1rem;font-weight:700;
-               color:var(--ink);font-style:italic}
-
-  @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
-  @keyframes wiggle{0%,100%{transform:rotate(-5deg)}50%{transform:rotate(5deg)}}
-  @keyframes bounce{from{transform:translateY(-50%) scale(1)}
-                    to{transform:translateY(-62%) scale(1.1)}}
-  @keyframes pop{0%{transform:scale(.5)}80%{transform:scale(1.2)}100%{transform:scale(1)}}
-
-  @media(max-width:600px){
-    .card{margin:2rem 4vw} #progress-section,#done-section{margin:0 4vw 3rem}
-    .stats-row{flex-wrap:wrap;gap:1rem}
-  }
-</style>
-</head>
-<body>
-
-<header>
-  <div class="eyebrow">JobScraper &middot; Detailhandel EFZ Profil</div>
-  <h1>Jobs <em>finden</em><br>auf Knopfdruck</h1>
-  <p class="subtitle">Scrapt jobs.ch &mdash; filtert &mdash; generiert HTML &mdash; fertig.</p>
-</header>
-
-<div class="card" id="form-card">
-  <div class="field">
-    <label for="location">Stadt / Region</label>
-    <input type="text" id="location" value="winterthur" placeholder="z.B. winterthur, zurich">
-  </div>
-  <div class="field">
-    <label for="max_pages">Max. Seiten <small style="text-transform:none;letter-spacing:0">(leer = alle)</small></label>
-    <input type="number" id="max_pages" placeholder="z.B. 5 (zum Testen)" min="1">
-    <div class="hint">Jede Seite = 1 Sek. Wartezeit. Winterthur hat ~74 Seiten.</div>
-  </div>
-  <button id="start-btn" onclick="startScraping()">&#x1F50D;&nbsp; Stellen suchen</button>
-</div>
-
-<!-- Progress view -->
-<div id="progress-section">
-  <div class="stage-row">
-    <div class="stage-icon" id="stage-icon">&#x1F50D;</div>
-    <div class="stage-info">
-      <h2 id="stage-title">Starte&hellip;</h2>
-      <p id="stage-sub">Initialisierung</p>
-    </div>
-  </div>
-
-  <div class="track-wrap">
-    <div class="track">
-      <div class="fill" id="fill">
-        <span class="mascot" id="mascot">&#x1F43F;&#xFE0F;</span>
-      </div>
-    </div>
-    <div class="pct" id="pct-label">0%</div>
-  </div>
-
-  <div class="funny-msg" id="funny-msg">Aufwärmen der virtuellen Maschine&hellip; &#x2615;</div>
-
-  <div class="stats-row">
-    <span id="stat-pages">&#x1F4C4; 0 Seiten</span>
-    <span id="stat-jobs">&#x1F4BC; 0 Jobs</span>
-    <span id="stat-filtered">&#x2714;&#xFE0F; &mdash; relevant</span>
-  </div>
-
-  <div class="log-box" id="log-box"><p style="color:#6B9">Warte auf Scraper&hellip;</p></div>
-</div>
-
-<!-- Done view -->
-<div id="done-section">
-  <div class="done-card">
-    <div class="done-icon">&#x1F389;</div>
-    <h2>Fertig!</h2>
-    <p>Der Scraper hat seine Arbeit getan. Hier sind deine Ergebnisse:</p>
-    <div class="done-stats">
-      <div class="done-stat"><strong id="done-total">0</strong><span>Geprüft</span></div>
-      <div class="done-stat"><strong id="done-kept">0</strong><span>Passend</span></div>
-      <div class="done-stat"><strong id="done-easy">0</strong><span>Easy Apply</span></div>
-    </div>
-    <a href="#" id="view-link" class="view-btn" target="_blank">
-      &#x1F440;&nbsp; Stellen ansehen
-    </a>
-    <button class="reset-btn" onclick="resetToStart()">&#x21A9; Neue Suche starten</button>
-  </div>
-</div>
-
-<footer>
-  <div class="footer-logo">JobScraper</div>
-  <div>Lokal &middot; jobs.ch &middot; Detailhandel EFZ</div>
-</footer>
-
-<script>
-// ── Funny message banks per stage ────────────────────────────────────────────
-const MSGS = {
-  start: [
-    "Klopfe h\u00f6flich an den jobs.ch-Server\u2026 🚪",
-    "Schminke den User-Agent\u2026 💄",
-    "\u00DCberzeuge jobs.ch, dass wir Menschen sind\u2026 🤖",
-    "Erwecke den Scraper aus dem Winterschlaf\u2026 💤",
-  ],
-  scraping: [
-    "Politely stealing data since 2024\u2026 📋",
-    "Seite {page}/{total}: Sammle Jobs wie ein Eichh\u00f6rnchen N\u00fcsse 🐿\uFE0F",
-    "Ich schw\u00f6re, ich bin kein Bot. Ehrlich. Wirklich. 🤔",
-    "Schon wieder eine Seite\u2026 wir h\u00f6ren gleich auf\u2026 vielleicht\u2026 📄",
-    "Lade Seite {page} herunter\u2026 bitte warten \u23F3",
-    "Bereits {jobs} Jobs eingesackt, noch {left} Seiten 💼",
-    "Der Server antwortet\u2026 irgendwann\u2026 hoffentlich\u2026 🌍",
-    "Seite {page} von {total}: der Scraper ist unaufhaltsam 🚀",
-  ],
-  workload: [
-    "Entferne 20%-Stellen\u2026 Pensum-Check! \u23F1",
-    "Filtere alles unter 80% aus\u2026 Vollzeit oder nichts! 💪",
-    "Tsch\u00fcss, Minijobs! 👋",
-  ],
-  keywords: [
-    "Auf Wiedersehen, Neurochirurgen! 🧠👋",
-    "Tsch\u00fcss, Raketeningenieure! 🚀👋",
-    "Keine Stellen f\u00fcr Kernkraft-Betreiber heute\u2026 \u2622\uFE0F",
-    "Entferne alles mit '10 Jahre Erfahrung f\u00fcr Einsteiger'\u2026 🙄",
-    "Polymechaniker? Danke, weiter. 🔩",
-  ],
-  relevance: [
-    "Suche passende Stellen\u2026 🔍",
-    "Pr\u00fcfe Relevanz-Keywords\u2026 📝",
-    "Behalte nur die Guten! \u2B50",
-  ],
-  dedup: [
-    "Entferne doppelte Stellen\u2026 📸",
-    "Einmal reicht! Duplikate fliegen raus\u2026 🙆",
-  ],
-  generating: [
-    "Pinsel schwingen f\u00fcr dein HTML-Kunstwerk\u2026 🎨",
-    "W\u00e4hle die perfekte Schriftart\u2026 Es ist Fraunces. Nat\u00fcrlich. \u2712\uFE0F",
-    "Bastle ein HTML so sch\u00f6n, dass sogar Picasso neidisch w\u00e4re\u2026 🖼\uFE0F",
-    "CSS-Magie\u2026 \u2728",
-  ],
-};
-
-const STAGE_ICONS = {
-  start:      "🔍",
-  scraping:   "📄",
-  workload:   "\u23F1",
-  keywords:   "\u2702\uFE0F",
-  relevance:  "🔎",
-  dedup:      "📸",
-  generating: "🎨",
-  done:       "\u2705",
-};
-const STAGE_TITLES = {
-  start:      "Scraper startet\u2026",
-  scraping:   "Lade Seiten herunter",
-  workload:   "Pensum-Filter",
-  keywords:   "Ausschluss-Filter",
-  relevance:  "Relevanz-Check",
-  dedup:      "Deduplizierung",
-  generating: "Generiere HTML",
-  done:       "Fertig!",
-};
-
-let _msgTimer = null;
-let _currentStage = 'start';
-let _pageData = { page: 0, total: 0, jobs: 0 };
-let _filteredCount = 0;
-let _msgIdx = 0;
-
-function pickMsg(stage) {
-  const bank = MSGS[stage] || MSGS.start;
-  const tpl = bank[_msgIdx % bank.length];
-  _msgIdx++;
-  return tpl
-    .replace('{page}',  _pageData.page)
-    .replace('{total}', _pageData.total)
-    .replace('{jobs}',  _pageData.jobs)
-    .replace('{left}',  Math.max(0, _pageData.total - _pageData.page));
-}
-
-function setStage(stage) {
-  _currentStage = stage;
-  _msgIdx = 0;
-  document.getElementById('stage-icon').textContent  = STAGE_ICONS[stage] || "🔍";
-  document.getElementById('stage-title').textContent = STAGE_TITLES[stage] || stage;
-  document.getElementById('stage-sub').textContent   = '';
-  showNextMsg();
-}
-
-function showNextMsg() {
-  const el = document.getElementById('funny-msg');
-  el.style.opacity = '0';
-  setTimeout(() => {
-    el.textContent = pickMsg(_currentStage);
-    el.style.opacity = '1';
-  }, 300);
-}
-
-function setProgress(pct) {
-  document.getElementById('fill').style.width = pct + '%';
-  document.getElementById('pct-label').textContent = pct + '%';
-  // Hide mascot at 0%, keep visible otherwise
-  document.getElementById('mascot').style.display = pct > 2 ? 'block' : 'none';
-}
-
-function addLog(msg) {
-  const box = document.getElementById('log-box');
-  const p = document.createElement('p');
-  p.textContent = msg;
-  box.appendChild(p);
-  // Keep last 12 lines
-  while (box.children.length > 12) box.removeChild(box.firstChild);
-  box.scrollTop = box.scrollHeight;
-}
-
-function updatePageStats(page, total, jobs) {
-  _pageData = { page, total, jobs };
-  document.getElementById('stat-pages').textContent =
-    '📄 ' + page + (total ? '/' + total : '') + ' Seiten';
-  document.getElementById('stat-jobs').textContent = '💼 ' + jobs + ' Jobs';
-}
-
-function updateFilterStat(remaining) {
-  _filteredCount = remaining;
-  document.getElementById('stat-filtered').textContent =
-    '\u2714\uFE0F ' + remaining + ' relevant';
-}
-
-let _evtSource = null;
-
-function startScraping() {
-  const location  = document.getElementById('location').value.trim() || 'winterthur';
-  const maxPages  = document.getElementById('max_pages').value.trim();
-
-  document.getElementById('form-card').style.display    = 'none';
-  document.getElementById('progress-section').style.display = 'block';
-  document.getElementById('done-section').style.display  = 'none';
-
-  setStage('start');
-  setProgress(2);
-  document.getElementById('start-btn').disabled = true;
-
-  // Rotate funny messages every 3.5s
-  _msgTimer = setInterval(() => showNextMsg(), 3500);
-
-  let url = '/scrape?location=' + encodeURIComponent(location);
-  if (maxPages) url += '&max_pages=' + encodeURIComponent(maxPages);
-
-  _evtSource = new EventSource(url);
-
-  _evtSource.addEventListener('found', e => {
-    const d = JSON.parse(e.data);
-    setStage('scraping');
-    setProgress(5);
-    updatePageStats(1, d.total_pages, 0);
-    addLog('📊 Gefunden: ' + d.total + ' Jobs auf ' + d.total_pages + ' Seiten (' + d.location + ')');
-  });
-
-  _evtSource.addEventListener('page', e => {
-    const d = JSON.parse(e.data);
-    setProgress(d.progress);
-    updatePageStats(d.page, d.total_pages, d.jobs_so_far);
-    if (d.page % 5 === 0) addLog('📄 Seite ' + d.page + '/' + d.total_pages + ' geladen (' + d.jobs_so_far + ' Jobs bisher)');
-  });
-
-  _evtSource.addEventListener('scrape_done', e => {
-    const d = JSON.parse(e.data);
-    setProgress(62);
-    addLog('\u2705 Scraping abgeschlossen: ' + d.jobs + ' einzigartige Jobs');
-    setStage('workload');
-  });
-
-  _evtSource.addEventListener('stage', e => {
-    const d = JSON.parse(e.data);
-    setStage(d.stage);
-    setProgress(d.progress);
-    if (d.stage === 'workload')   addLog('\u23F1 Pensum-Filter: ' + d.remaining + ' verbleibend (' + d.excluded + ' ausgeschlossen)');
-    if (d.stage === 'keywords')  addLog('\u2702\uFE0F Keyword-Filter: ' + d.remaining + ' verbleibend (' + d.excluded + ' ausgeschlossen)');
-    if (d.stage === 'relevance') { addLog('🔎 Relevanz-Check: ' + d.remaining + ' verbleibend (' + d.excluded + ' ausgeschlossen)'); updateFilterStat(d.remaining); }
-    if (d.stage === 'dedup')     { addLog('📸 Deduplizierung: ' + d.kept + ' finale Stellen'); updateFilterStat(d.kept); }
-    if (d.stage === 'generating') addLog('🎨 Generiere HTML\u2026');
-  });
-
-  _evtSource.addEventListener('done', e => {
-    const d = JSON.parse(e.data);
-    clearInterval(_msgTimer);
-    _evtSource.close();
-
-    setStage('done');
-    setProgress(100);
-    document.getElementById('mascot').textContent = '🎉';
-    document.getElementById('funny-msg').textContent = 'Fertig! Deine Traumjobs warten\u2026 🎉';
-    addLog('🎉 HTML gespeichert: ' + d.html_name);
-
-    // Show done section after short delay
-    setTimeout(() => {
-      document.getElementById('progress-section').style.display = 'none';
-      const ds = document.getElementById('done-section');
-      ds.style.display = 'block';
-      document.getElementById('done-total').textContent = d.stats.total  || 0;
-      document.getElementById('done-kept').textContent  = d.stats.kept   || 0;
-      document.getElementById('done-easy').textContent  = d.easy_count   || 0;
-      document.getElementById('view-link').href = '/results/' + encodeURIComponent(d.html_name);
-    }, 1200);
-  });
-
-  _evtSource.addEventListener('error_msg', e => {
-    clearInterval(_msgTimer);
-    const d = JSON.parse(e.data);
-    document.getElementById('funny-msg').textContent = '\u274C Fehler: ' + d.msg;
-    document.getElementById('funny-msg').style.color = 'var(--rust)';
-    addLog('\u274C ' + d.msg);
-    if (_evtSource) _evtSource.close();
-  });
-
-  _evtSource.onerror = () => {
-    // SSE done (stream closed) – normal after completion
-    if (_evtSource) _evtSource.close();
-  };
-}
-
-function resetToStart() {
-  document.getElementById('form-card').style.display    = 'block';
-  document.getElementById('progress-section').style.display = 'none';
-  document.getElementById('done-section').style.display  = 'none';
-  document.getElementById('start-btn').disabled = false;
-  setProgress(0);
-  document.getElementById('log-box').innerHTML = '<p style="color:#6B9">Warte auf Scraper\u2026</p>';
-  document.getElementById('stat-pages').textContent = '📄 0 Seiten';
-  document.getElementById('stat-jobs').textContent  = '💼 0 Jobs';
-  document.getElementById('stat-filtered').textContent = '\u2714\uFE0F \u2014 relevant';
-  document.getElementById('mascot').textContent = '🐿\uFE0F';
-  clearInterval(_msgTimer);
-}
-</script>
-</body>
-</html>"""
-
+@app.route('/api/history/<int:search_id>', methods=['GET'])
+@jwt_required()
+def history_detail(search_id):
+    current_user_id = get_jwt_identity()
+    search = SearchHistory.query.filter_by(id=search_id, user_id=current_user_id).first()
+    
+    if not search:
+        return jsonify({"msg": "Search not found"}), 404
+        
+    return jsonify({
+        "id": search.id,
+        "location": search.location,
+        "timestamp": search.timestamp.isoformat(),
+        "summary": json.loads(search.results_summary) if search.results_summary else {},
+        "results": json.loads(search.results_json) if search.results_json else []
+    })
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.route("/")
-def index():
-    return START_HTML
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_react(path):
+    from flask import send_from_directory
+    # If the request matches an API route, let Flask handle it
+    if path.startswith('api/') or path == 'scrape' or path.startswith('results/'):
+        pass # Will fall through or be caught by other routes if we don't return here, but flask needs it handled.
+        # Actually better to handle it properly below
+        
+    dist_dir = os.path.join(app.root_path, 'frontend', 'dist')
+    if path and os.path.exists(os.path.join(dist_dir, path)):
+        return send_from_directory(dist_dir, path)
+    else:
+        return send_from_directory(dist_dir, 'index.html')
 
 
 @app.route("/scrape")
@@ -504,6 +193,18 @@ def scrape_sse():
     location = re.sub(r'[^a-z0-9\-]', '', _raw_location.lower())[:50] or "winterthur"
     max_pages_s  = (request.args.get("max_pages") or "").strip()
     max_pages    = int(max_pages_s) if max_pages_s.isdigit() else None
+    
+    token = request.args.get("token")
+    if not token:
+        return Response("event: error_msg\ndata: {\"msg\": \"No token provided\"}\n\n", mimetype="text/event-stream")
+
+    # Decode token to get user profile
+    from flask_jwt_extended import decode_token
+    try:
+        decoded = decode_token(token)
+        user_id = decoded['sub']
+    except Exception as e:
+        return Response(f"event: error_msg\ndata: {json.dumps({'msg': 'Invalid token'})}\n\n", mimetype="text/event-stream")
 
     def generate():
         if not _run_lock.acquire(blocking=False):
@@ -516,46 +217,84 @@ def scrape_sse():
         def on_progress(event_type: str, **kwargs):
             progress_q.put((event_type, kwargs))
 
-        def run_scraper():
-            try:
-                raw_jobs = scrape(location, max_pages, progress_fn=on_progress)
+        def run_scraper(app_context):
+            with app_context:
+                try:
+                    user = User.query.get(user_id)
+                    if not user:
+                        progress_q.put(("error_msg", {"msg": "User not found"}))
+                        return
+                        
+                    profile = user.profile
+                    
+                    # Convert DB Profile to dict for filter_jobs
+                    profile_dict = {
+                        'min_workload': profile.min_workload,
+                        'allow_quereinstieg': profile.allow_quereinstieg,
+                    }
+                    
+                    # Special logic for legacy 'seba' user
+                    if user.username == 'seba':
+                        # Leave include/exclude as None so JobScraper uses its legacy defaults
+                        profile_dict['include_keywords'] = None
+                        profile_dict['exclude_keywords'] = None
+                        profile_dict['manual_exclude_titles'] = None
+                    else:
+                        # For generic users, construct simple include list based on interests
+                        # Realistically you'd want a more robust mapping here
+                        profile_dict['include_keywords'] = profile.get_interests_list()
+                        profile_dict['exclude_keywords'] = [] # Start empty for custom users
+                        profile_dict['manual_exclude_titles'] = []
+                        if not profile.allow_quereinstieg:
+                            profile_dict['exclude_keywords'].append("quereinsteig")
+                            profile_dict['exclude_keywords'].append("quereinstieg")
 
-                if not raw_jobs:
-                    progress_q.put(("error_msg", {"msg": "Keine Jobs gefunden"}))
-                    return
+                    raw_jobs = scrape(location, max_pages, progress_fn=on_progress)
 
-                ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-                stem = f"jobs_{location}_{ts}"
+                    if not raw_jobs:
+                        progress_q.put(("error_msg", {"msg": "Keine Jobs gefunden"}))
+                        return
 
-                RAW_DIR.mkdir(parents=True, exist_ok=True)
-                save_csv(raw_jobs,  RAW_DIR / f"{stem}.csv")
-                save_json(raw_jobs, RAW_DIR / f"{stem}.json")
+                    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    stem = f"jobs_{location}_{ts}"
 
-                filtered, stats = filter_jobs(raw_jobs, verbose=False, progress_fn=on_progress)
+                    RAW_DIR.mkdir(parents=True, exist_ok=True)
+                    save_csv(raw_jobs,  RAW_DIR / f"{stem}.csv")
+                    save_json(raw_jobs, RAW_DIR / f"{stem}.json")
 
-                on_progress("stage", stage="generating",
-                            remaining=len(filtered), excluded=0)
+                    filtered, stats = filter_jobs(raw_jobs, verbose=False, progress_fn=on_progress, profile=profile_dict)
 
-                FILT_DIR.mkdir(parents=True, exist_ok=True)
-                save_json(filtered, FILT_DIR / f"{stem}_filtered.json")
+                    on_progress("stage", stage="saving",
+                                remaining=len(filtered), excluded=0)
 
-                html_name = f"jobs_{location}_{ts}.html"
-                generate_html(filtered, stats, location, FILT_DIR / html_name)
+                    FILT_DIR.mkdir(parents=True, exist_ok=True)
+                    save_json(filtered, FILT_DIR / f"{stem}_filtered.json")
 
-                easy_count = sum(1 for j in filtered if j.get('easy_apply'))
-                result.update(html_name=html_name, stats=stats, easy_count=easy_count)
-                progress_q.put(("done", {
-                    "html_name": html_name,
-                    "stats": stats,
-                    "easy_count": easy_count,
-                }))
+                    easy_count = sum(1 for j in filtered if j.get('easy_apply'))
+                    
+                    # Save search history to DB
+                    new_history = SearchHistory(
+                        user_id=user.id,
+                        location=location,
+                        results_summary=json.dumps({"total": stats['total'], "kept": stats['kept'], "easy": easy_count}),
+                        results_json=json.dumps(filtered)
+                    )
+                    db.session.add(new_history)
+                    db.session.commit()
 
-            except Exception as exc:
-                progress_q.put(("error_msg", {"msg": f"{type(exc).__name__}: {exc}"}))
-            finally:
-                progress_q.put(("__sentinel__", {}))
+                    result.update(stats=stats, easy_count=easy_count)
+                    progress_q.put(("done", {
+                        "stats": stats,
+                        "easy_count": easy_count,
+                    }))
 
-        t = threading.Thread(target=run_scraper, daemon=True)
+                except Exception as exc:
+                    progress_q.put(("error_msg", {"msg": f"{type(exc).__name__}: {exc}"}))
+                finally:
+                    progress_q.put(("__sentinel__", {}))
+
+        # Pass the Flask application context to the thread so it can access the DB
+        t = threading.Thread(target=run_scraper, args=(app.app_context(),), daemon=True)
         t.start()
 
         _PROGRESS_MAP = {
@@ -567,7 +306,7 @@ def scrape_sse():
             "keywords":   72,
             "relevance":  78,
             "dedup":      83,
-            "generating": 90,
+            "saving":     90,
         }
 
         try:

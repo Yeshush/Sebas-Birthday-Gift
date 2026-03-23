@@ -418,28 +418,37 @@ def parse_workload(workload_str: str) -> tuple[int, int]:
         return (0, 0)
 
 
-def workload_ok(workload_str: str) -> bool:
-    """Gibt True zurück wenn das maximale Pensum >= MIN_WORKLOAD_PERCENT."""
+def workload_ok(workload_str: str, min_workload: int = MIN_WORKLOAD_PERCENT) -> bool:
+    """Gibt True zurück wenn das maximale Pensum >= min_workload."""
     _, max_w = parse_workload(workload_str)
-    return max_w >= MIN_WORKLOAD_PERCENT
+    return max_w >= min_workload
 
 
-def is_excluded(title: str) -> tuple[bool, str]:
+def is_excluded(title: str, exclude_kws: list = None, manual_excludes: list = None) -> tuple[bool, str]:
     """Prüft ob der Titel ein Ausschluss-Keyword enthält."""
     tl = title.lower()
-    for kw in EXCLUDE_KEYWORDS:
+    kws = exclude_kws if exclude_kws is not None else EXCLUDE_KEYWORDS
+    manuals = manual_excludes if manual_excludes is not None else MANUAL_EXCLUDE_TITLES
+    
+    for kw in kws:
         if kw in tl:
             return True, f"Ausschluss-Keyword: '{kw}'"
-    for manual in MANUAL_EXCLUDE_TITLES:
+    for manual in manuals:
         if manual in tl:
             return True, f"Manueller Ausschluss: '{manual}'"
     return False, ""
 
 
-def is_included(title: str) -> tuple[bool, str]:
+def is_included(title: str, include_kws: list = None) -> tuple[bool, str]:
     """Prüft ob der Titel ein Inklusions-Keyword enthält."""
     tl = title.lower()
-    for kw in INCLUDE_KEYWORDS:
+    kws = include_kws if include_kws is not None else INCLUDE_KEYWORDS
+    
+    # If the user has empty inclusion lists, it means everything goes
+    if include_kws is not None and len(include_kws) == 0:
+        return True, "Keine spezifischen Inklusionen verlangt"
+        
+    for kw in kws:
         if kw in tl:
             return True, f"Inklusions-Keyword: '{kw}'"
     return False, ""
@@ -477,8 +486,15 @@ def fix_company(job: dict) -> str:
 
 
 def filter_jobs(jobs: list[dict], verbose: bool = True,
-                progress_fn=None) -> tuple[list[dict], dict]:
+                progress_fn=None, profile: dict = None) -> tuple[list[dict], dict]:
     """Filtert die Job-Liste und gibt (gefilterte_jobs, statistiken) zurück."""
+    
+    # Extract dynamic profile parameters if provided
+    min_workload = profile.get('min_workload', MIN_WORKLOAD_PERCENT) if profile else MIN_WORKLOAD_PERCENT
+    include_kws = profile.get('include_keywords') if profile else None
+    exclude_kws = profile.get('exclude_keywords') if profile else None
+    manual_excludes = profile.get('manual_exclude_titles') if profile else None
+    
     stats = {
         'total': len(jobs),
         'excluded_workload': 0,
@@ -494,7 +510,7 @@ def filter_jobs(jobs: list[dict], verbose: bool = True,
 
     # SCHRITT 1: Pensum-Filter
     for job in jobs:
-        if workload_ok(job.get('workload', '')):
+        if workload_ok(job.get('workload', ''), min_workload):
             step1_workload.append(job)
         else:
             stats['excluded_workload'] += 1
@@ -510,7 +526,7 @@ def filter_jobs(jobs: list[dict], verbose: bool = True,
 
     # SCHRITT 2: Ausschluss-Keywords
     for job in step1_workload:
-        excluded, grund = is_excluded(job.get('title', ''))
+        excluded, grund = is_excluded(job.get('title', ''), exclude_kws, manual_excludes)
         if not excluded:
             step2_keywords.append(job)
         else:
@@ -527,7 +543,7 @@ def filter_jobs(jobs: list[dict], verbose: bool = True,
 
     # SCHRITT 3: Relevanz-Check
     for job in step2_keywords:
-        included, _ = is_included(job.get('title', ''))
+        included, _ = is_included(job.get('title', ''), include_kws)
         if included:
             step3_relevant.append(job)
         else:

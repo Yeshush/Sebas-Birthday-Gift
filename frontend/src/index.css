@@ -1,0 +1,38 @@
+:root {
+  --cream: #F5F0E8; --ink: #1A1510; --rust: #C4502A; --sage: #5A7A5A;
+  --gold: #C9974A; --sand: #E8DEC8; --mist: #D4CFC5; --card-bg: #FDFAF4;
+  --bg-primary: var(--cream);
+  --text-primary: var(--ink);
+  --text-secondary: #6B6155;
+  --border-color: var(--mist);
+}
+
+.dark-mode {
+  --cream: #1A1510; --ink: #F5F0E8; --rust: #E07050; --sage: #8BA88B;
+  --gold: #E5B56A; --sand: #2A2520; --mist: #443F3A; --card-bg: #221D18;
+  --text-secondary: #9A8E82;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { 
+  background: var(--bg-primary); 
+  color: var(--text-primary); 
+  font-family: 'DM Sans', sans-serif; 
+  font-weight: 300; 
+  min-height: 100vh; 
+  display: flex; 
+  flex-direction: column; 
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* grain */
+body::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 999; opacity: .5;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+}
+
+.dark-mode body::before {
+  opacity: .2;
+}
+
+h1, h2, h3 { font-family: 'Fraunces', serif; }
