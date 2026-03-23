@@ -288,6 +288,7 @@ def scrape_sse():
                     progress_q.put(("done", {
                         "stats": stats,
                         "easy_count": easy_count,
+                        "search_id": new_history.id
                     }))
 
                 except Exception as exc:
