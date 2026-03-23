@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
@@ -24,6 +25,16 @@ _CAT_LABELS = {
 }
 
 
+@dataclass
+class FilterProfile:
+    """Per-user filter overrides. None fields fall back to config.toml defaults."""
+    min_workload:          int | None       = None
+    include_keywords:      list[str] | None = None
+    exclude_keywords:      list[str] | None = None
+    manual_exclude_titles: list[str] | None = None
+    allow_quereinstieg:    bool             = True
+
+
 def parse_workload(workload_str: str) -> tuple[int, int]:
     """Parse workload strings like '80 – 100%' or '100%'. Returns (min, max)."""
     if not workload_str:
@@ -43,28 +54,28 @@ def parse_workload(workload_str: str) -> tuple[int, int]:
         return (0, 0)
 
 
-def workload_ok(workload_str: str) -> bool:
-    """Return True if the maximum workload is >= the configured minimum."""
+def workload_ok(workload_str: str, min_workload: int) -> bool:
+    """Return True if the maximum workload is >= min_workload."""
     _, max_w = parse_workload(workload_str)
-    return max_w >= get_min_workload()
+    return max_w >= min_workload
 
 
-def is_excluded(title: str) -> tuple[bool, str]:
+def is_excluded(title: str, excludes: list[str], manuals: list[str]) -> tuple[bool, str]:
     """Check if the title contains any exclusion keyword."""
     tl = title.lower()
-    for kw in get_exclude_keywords():
+    for kw in excludes:
         if kw in tl:
             return True, f"Ausschluss-Keyword: '{kw}'"
-    for manual in get_manual_exclude_titles():
+    for manual in manuals:
         if manual in tl:
             return True, f"Manueller Ausschluss: '{manual}'"
     return False, ""
 
 
-def is_included(title: str) -> tuple[bool, str]:
+def is_included(title: str, includes: list[str]) -> tuple[bool, str]:
     """Check if the title contains any inclusion keyword."""
     tl = title.lower()
-    for kw in get_include_keywords():
+    for kw in includes:
         if kw in tl:
             return True, f"Inklusions-Keyword: '{kw}'"
     return False, ""
@@ -105,25 +116,28 @@ def filter_jobs(
     jobs: list[Job],
     verbose: bool = True,
     progress_fn: Callable[..., Any] | None = None,
+    profile: FilterProfile | None = None,
 ) -> tuple[list[Job], FilterStats]:
     """
     Run the 4-stage filter pipeline.
 
-    Stages:
-        1. Workload filter (≥ configured minimum)
-        2. Exclusion keywords
-        3. Inclusion/relevance keywords
-        4. Title-based deduplication + enrichment (company_clean, category)
-
-    Returns:
-        (filtered_jobs, stats)
+    profile overrides individual filter settings; None fields fall back to config.toml.
+    NOTE: fourth positional argument — run_in_executor callers must match this order.
     """
+    # Resolve filter values from profile or config.toml defaults
+    min_w    = profile.min_workload          if (profile and profile.min_workload is not None)          else get_min_workload()
+    includes = profile.include_keywords      if (profile and profile.include_keywords is not None)      else get_include_keywords()
+    excludes = profile.exclude_keywords      if (profile and profile.exclude_keywords is not None)      else get_exclude_keywords()
+    manuals  = profile.manual_exclude_titles if (profile and profile.manual_exclude_titles is not None) else get_manual_exclude_titles()
+    if profile and not profile.allow_quereinstieg:
+        excludes = list(excludes) + ["quereinstieg", "quereinsteiger"]
+
     stats = FilterStats(total=len(jobs))
 
     # Stage 1: Workload
     stage1: list[Job] = []
     for job in jobs:
-        if workload_ok(job.workload):
+        if workload_ok(job.workload, min_w):
             stage1.append(job)
         else:
             stats.excluded_workload += 1
@@ -140,7 +154,7 @@ def filter_jobs(
     # Stage 2: Exclusion keywords
     stage2: list[Job] = []
     for job in stage1:
-        excluded, reason = is_excluded(job.title)
+        excluded, reason = is_excluded(job.title, excludes, manuals)
         if not excluded:
             stage2.append(job)
         else:
@@ -158,7 +172,7 @@ def filter_jobs(
     # Stage 3: Inclusion/relevance
     stage3: list[Job] = []
     for job in stage2:
-        included, _ = is_included(job.title)
+        included, _ = is_included(job.title, includes)
         if included:
             stage3.append(job)
         else:
