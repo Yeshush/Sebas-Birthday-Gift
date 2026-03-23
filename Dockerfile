@@ -38,4 +38,4 @@ ENV PORT=8080
 EXPOSE $PORT
 
 # Run Gunicorn using the shell form so it evaluates the $PORT variable
-CMD gunicorn -w 1 -b 0.0.0.0:$PORT server:app
+CMD gunicorn -w 1 -b 0.0.0.0:${PORT:-8080} server:app
