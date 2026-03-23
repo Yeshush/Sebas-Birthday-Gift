@@ -174,12 +174,14 @@ p = FilterProfile(
 
 ## Scrape + Filter + DB Data Flow
 
+**`filters.py` helper signature changes (required):** `workload_ok`, `is_excluded`, and `is_included` currently call the `get_*()` config getters directly with no arguments. As part of this change they must be updated to accept the resolved values as parameters — `workload_ok(workload_str, min_w)`, `is_excluded(title, excludes, manuals)`, `is_included(title, includes)` — so that the profile override cannot be silently bypassed by the helpers.
+
 The SSE endpoint does the following in order:
 
 1. Validate JWT token from `?token=` query param.
 2. Acquire async lock (prevent concurrent scrapes).
 3. Start `scrape_async(location, max_pages, progress_queue)` as an `asyncio.Task`.
-4. Stream SSE events from `progress_queue` as scraping progresses.
+4. Drain `progress_queue` in a loop, forwarding each event as an SSE frame to the browser — **except** `scrape_done`, which is the internal sentinel that signals scraping is complete and must not be forwarded to the client. When `scrape_done` is received, exit the drain loop and proceed to step 5.
 5. When scraping completes, run `filter_jobs()` **via `run_in_executor`** (it is synchronous and CPU-blocking — must not run on the event loop thread):
    ```python
    filtered, stats = await loop.run_in_executor(None, filter_jobs, raw_jobs, False, None, user_filter_profile)
@@ -269,6 +271,7 @@ GET /scrape?location=winterthur&max_pages=5&token=<jwt>
 
 SSE events:
   found      → {total, total_pages, location, progress}
+               -- scrape_async emits {total, total_pages, location}; server adds progress before forwarding
   page       → {page, total_pages, jobs_so_far, progress}
   stage      → {stage, remaining, excluded, progress}
                -- Exception: "dedup" stage emits {stage, kept} not {remaining, excluded}.
