@@ -9,7 +9,11 @@ venv/
 results/
 filtered_results/
 *.csv
-*.json
+/*.json
+!package.json
+!package-lock.json
+!frontend/package.json
+!frontend/package-lock.json
 *.html
 
 # macOS
