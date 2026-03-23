@@ -2,11 +2,9 @@
 FROM node:20-slim AS frontend-builder
 WORKDIR /app/frontend
 
-# Install dependencies
 COPY frontend/package*.json ./
 RUN npm ci
 
-# Copy the rest of the frontend code and build
 COPY frontend/ ./
 RUN npm run build
 
@@ -15,27 +13,26 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install system dependencies (gcc is often needed for some python packages like psycopg)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements.txt .
+# Install Python deps (cached layer — only reruns when requirements.txt changes)
+COPY requirements.txt pyproject.toml ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the backend source code
+# Install the jobscraper package so `jobscraper.server` is importable
+COPY src/ ./src/
+RUN pip install --no-deps -e .
+
+# Copy remaining source files
 COPY . .
 
-# Copy the built React assets from the first stage
+# Copy the built React assets from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Railway will inject the PORT environment variable at runtime.
-# We set a default here just in case.
 ENV PORT=8080
-
-# Expose the port (optional but good practice for documentation)
 EXPOSE $PORT
 
-# Run Gunicorn via start.sh
-CMD ["./start.sh"]
+# sh -c ensures ${PORT:-8080} is expanded by the shell before uvicorn sees it
+CMD ["sh", "-c", "uvicorn jobscraper.server:app --host 0.0.0.0 --port ${PORT:-8080}"]
