@@ -19,19 +19,23 @@ import re
 import sys
 import threading
 import webbrowser
+import os
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, Response, redirect, request, send_file
 
-# Import scraper functions directly – no subprocess needed
-sys.path.insert(0, str(Path(__file__).parent))
+# Import scraper functions directly
+BASE_DIR = Path(__file__).parent.absolute()
+sys.path.insert(0, str(BASE_DIR))
 from JobScraper import (
     scrape, filter_jobs, save_csv, save_json, generate_html,
 )
 
 app = Flask(__name__)
 
+# Output directories should be relative to the CURRENT WORKING DIRECTORY
+# where the user runs the .exe, NOT the temporary bundle directory.
 FILT_DIR = Path("filtered_results")
 RAW_DIR  = Path("results")
 _run_lock = threading.Lock()
@@ -601,24 +605,40 @@ def scrape_sse():
     )
 
 
-@app.route("/results/<path:filename>")
+from werkzeug.utils import secure_filename
+
+@app.route("/results/<filename>")
 def serve_result(filename):
-    filepath = FILT_DIR / filename
-    resolved = filepath.resolve()
-    # Guard against path traversal (e.g. /results/../../server.py)
-    if not str(resolved).startswith(str(FILT_DIR.resolve())):
-        return "Zugriff verweigert", 403
-    if not resolved.exists():
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        return "Ungültiger Dateiname", 400
+        
+    filepath = FILT_DIR / safe_name
+    
+    # Verify the resolved path is still within FILT_DIR to prevent directory traversal
+    try:
+        if not filepath.resolve().is_relative_to(FILT_DIR.resolve()):
+            return "Ungültiger Zugriff", 403
+    except ValueError:
+        pass
+        
+    if not filepath.exists():
         return "Datei nicht gefunden", 404
-    return send_file(resolved)
+        
+    return send_file(filepath.resolve())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    port = 5001
+    # Railway expects the application to listen on the port defined by the PORT environment variable.
+    port = int(os.environ.get("PORT", 5001))
     url  = f"http://localhost:{port}"
-    print(f"\n\U0001F680  JobScraper-Frontend startet auf {url}")
+    print(f"\n\U0001F680  JobScraper-Frontend startet auf Port {port}")
     print("   Drücke Ctrl+C zum Beenden.\n")
-    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    
+    # Only open browser if not running in a cloud environment (PORT env var is usually set there)
+    if not os.environ.get("PORT"):
+        threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+        
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

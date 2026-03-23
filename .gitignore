@@ -21,3 +21,6 @@ firebase-debug.log
 # Env
 .env
 .env.local
+build/
+dist/
+*.spec
