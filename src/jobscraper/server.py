@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import (
-    Base, JobRow, ProfileRow, SearchHistoryRow, UserRow, engine, get_db,
+    AsyncSessionLocal, Base, JobRow, ProfileRow, SearchHistoryRow, UserRow, engine, get_db,
 )
 from .filters import FilterProfile, filter_jobs
 from .models import Job
@@ -236,7 +236,6 @@ async def scrape_sse(
     location:  str           = Query("winterthur"),
     max_pages: int | None    = Query(None, ge=1, le=500),
     token:     str           = Query(...),
-    db:        AsyncSession  = Depends(get_db),
 ):
     # Validate JWT manually (EventSource cannot set headers)
     try:
@@ -306,16 +305,17 @@ async def scrape_sse(
                 return
 
             # Build per-user filter profile
-            profile_result = await db.execute(
-                select(ProfileRow).where(ProfileRow.user_id == user_id)
-            )
-            profile = profile_result.scalar_one_or_none()
-            interests = profile.get_interests_list() if profile else []
-            filter_profile = FilterProfile(
-                min_workload=profile.min_workload if profile else None,
-                allow_quereinstieg=profile.allow_quereinstieg if profile else True,
-                include_keywords=interests if interests else None,
-            )
+            async with AsyncSessionLocal() as db:
+                profile_result = await db.execute(
+                    select(ProfileRow).where(ProfileRow.user_id == user_id)
+                )
+                profile = profile_result.scalar_one_or_none()
+                interests = profile.get_interests_list() if profile else []
+                filter_profile = FilterProfile(
+                    min_workload=profile.min_workload if profile else None,
+                    allow_quereinstieg=profile.allow_quereinstieg if profile else True,
+                    include_keywords=interests if interests else None,
+                )
 
             # Run synchronous filter pipeline off the event loop
             loop = asyncio.get_running_loop()
@@ -330,36 +330,38 @@ async def scrape_sse(
 
             # Persist to DB
             easy_count  = sum(1 for j in filtered if j.easy_apply)
-            history_row = SearchHistoryRow(
-                user_id=user_id,
-                location=location,
-                total_count=stats.total,
-                kept_count=stats.kept,
-                easy_count=easy_count,
-            )
-            db.add(history_row)
-            await db.flush()
+            async with AsyncSessionLocal() as db:
+                history_row = SearchHistoryRow(
+                    user_id=user_id,
+                    location=location,
+                    total_count=stats.total,
+                    kept_count=stats.kept,
+                    easy_count=easy_count,
+                )
+                db.add(history_row)
+                await db.flush()
 
-            for job in filtered:
-                db.add(JobRow(
-                    search_id=history_row.id,
-                    uuid=job.uuid,
-                    title=job.title,
-                    company=job.company,
-                    company_clean=job.company_clean,
-                    location=job.location,
-                    workload=job.workload,
-                    contract_type=job.contract_type,
-                    published=job.published,
-                    is_promoted=job.is_promoted,
-                    easy_apply=job.easy_apply,
-                    url=job.url,
-                    category=job.category,
-                ))
-            await db.commit()
+                for job in filtered:
+                    db.add(JobRow(
+                        search_id=history_row.id,
+                        uuid=job.uuid,
+                        title=job.title,
+                        company=job.company,
+                        company_clean=job.company_clean,
+                        location=job.location,
+                        workload=job.workload,
+                        contract_type=job.contract_type,
+                        published=job.published,
+                        is_promoted=job.is_promoted,
+                        easy_apply=job.easy_apply,
+                        url=job.url,
+                        category=job.category,
+                    ))
+                await db.commit()
+                search_id = history_row.id
 
             yield (
-                f'event: done\ndata: {json.dumps({"stats": stats.model_dump(), "easy_count": easy_count, "search_id": history_row.id})}\n\n'
+                f'event: done\ndata: {json.dumps({"stats": stats.model_dump(), "easy_count": easy_count, "search_id": search_id})}\n\n'
             )
 
     return StreamingResponse(
