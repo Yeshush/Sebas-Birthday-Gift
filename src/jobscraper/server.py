@@ -1,156 +1,366 @@
-"""FastAPI web UI with SSE progress streaming for JobScraper."""
-
+"""FastAPI web server for JobScraper."""
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
-import threading
-import webbrowser
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Annotated, Any
 
-import uvicorn
-from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+import bcrypt as _bcrypt
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt
 from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-# Re-export scraper functions that server.py accesses directly
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from jobscraper.export import generate_html, save_csv, save_json
-from jobscraper.filters import filter_jobs
-from jobscraper.scraper import scrape
-
-_TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
-FILT_DIR = Path("filtered_results")
-RAW_DIR  = Path("results")
-
-_run_lock = asyncio.Lock()
-
-app = FastAPI(title="JobScraper", docs_url=None, redoc_url=None)
-
-_jinja = Environment(
-    loader=FileSystemLoader(_TEMPLATES_DIR),
-    autoescape=select_autoescape(["html"]),
+from .db import (
+    Base, JobRow, ProfileRow, SearchHistoryRow, UserRow, engine, get_db,
 )
+from .filters import FilterProfile, filter_jobs
+from .models import Job
+from .scraper import scrape_async
 
+load_dotenv()
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-me")
+JWT_ALGORITHM  = "HS256"
+JWT_EXPIRE_DAYS = 7
+
+def _hash_password(password: str) -> str:
+    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    return _bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+_scrape_lock: asyncio.Lock | None = None
+
+
+def _get_scrape_lock() -> asyncio.Lock:
+    global _scrape_lock
+    if _scrape_lock is None:
+        _scrape_lock = asyncio.Lock()
+    return _scrape_lock
+
+DIST_DIR = Path(__file__).parent.parent.parent / "frontend" / "dist"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with AsyncSession(engine) as session:
+        result = await session.execute(
+            select(UserRow).where(UserRow.username == "seba")
+        )
+        if not result.scalar_one_or_none():
+            seba = UserRow(username="seba", password_hash=_hash_password("seba123"))
+            session.add(seba)
+            await session.flush()
+            profile = ProfileRow(
+                user_id=seba.id,
+                education_level="EFZ",
+                min_workload=80,
+                interests=json.dumps(["detailhandel", "verkauf", "lager", "gastro"]),
+                allow_quereinstieg=True,
+            )
+            session.add(profile)
+            await session.commit()
+            logger.info("Seeded user 'seba'")
+    yield
+
+
+app = FastAPI(title="JobScraper", lifespan=lifespan, docs_url=None, redoc_url=None)
+
+
+# ── Auth helpers ───────────────────────────────────────────────────────────────
+
+def _create_token(user_id: int) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS)
+    return jwt.encode(
+        {"sub": str(user_id), "exp": expire},
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+
+
+async def get_current_user(
+    authorization: Annotated[str, Header()],
+    db: AsyncSession = Depends(get_db),
+) -> UserRow:
+    try:
+        token   = authorization.removeprefix("Bearer ").strip()
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload["sub"])
+    except (JWTError, ValueError, KeyError):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = await db.get(UserRow, user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+# ── Auth routes ────────────────────────────────────────────────────────────────
+
+@app.post("/api/login")
+async def login(request: Request, db: AsyncSession = Depends(get_db)):
+    body     = await request.json()
+    username = body.get("username", "")
+    password = body.get("password", "")
+    result   = await db.execute(select(UserRow).where(UserRow.username == username))
+    user     = result.scalar_one_or_none()
+    if not user or not _verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Bad username or password")
+    return {"access_token": _create_token(user.id), "username": user.username}
+
+
+@app.post("/api/register", status_code=201)
+async def register(request: Request, db: AsyncSession = Depends(get_db)):
+    body     = await request.json()
+    username = body.get("username", "")
+    password = body.get("password", "")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+    result = await db.execute(select(UserRow).where(UserRow.username == username))
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Username already exists")
+    user = UserRow(username=username, password_hash=_hash_password(password))
+    db.add(user)
+    await db.flush()
+    db.add(ProfileRow(user_id=user.id))
+    await db.commit()
+    return {"access_token": _create_token(user.id), "username": user.username}
+
+
+@app.get("/api/me")
+async def me(
+    current_user: Annotated[UserRow, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+):
+    result  = await db.execute(
+        select(ProfileRow).where(ProfileRow.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+    return {
+        "username": current_user.username,
+        "profile": {
+            "education_level": profile.education_level if profile else None,
+            "min_workload":    profile.min_workload    if profile else 80,
+            "interests":       profile.get_interests_list() if profile else [],
+            "allow_quereinstieg": profile.allow_quereinstieg if profile else True,
+        },
+    }
+
+
+# ── History routes ─────────────────────────────────────────────────────────────
+
+@app.get("/api/history")
+async def history(
+    current_user: Annotated[UserRow, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(SearchHistoryRow)
+        .where(SearchHistoryRow.user_id == current_user.id)
+        .order_by(SearchHistoryRow.timestamp.desc())
+    )
+    rows = result.scalars().all()
+    return [
+        {
+            "id":        r.id,
+            "location":  r.location,
+            "timestamp": r.timestamp.isoformat(),
+            "summary":   {"total": r.total_count, "kept": r.kept_count, "easy": r.easy_count},
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/history/{search_id}")
+async def history_detail(
+    search_id: int,
+    current_user: Annotated[UserRow, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(SearchHistoryRow).where(
+            SearchHistoryRow.id == search_id,
+            SearchHistoryRow.user_id == current_user.id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    jobs_result = await db.execute(
+        select(JobRow).where(JobRow.search_id == search_id)
+    )
+    jobs = jobs_result.scalars().all()
+
+    return {
+        "id":        row.id,
+        "location":  row.location,
+        "timestamp": row.timestamp.isoformat(),
+        "summary":   {"total": row.total_count, "kept": row.kept_count, "easy": row.easy_count},
+        "results": [
+            {
+                "title":      j.title,
+                "company":    j.company_clean or j.company,
+                "location":   j.location,
+                "workload":   j.workload,
+                "date":       j.published,   # published → date (frontend expects "date")
+                "link":       j.url,         # url → link (frontend expects "link")
+                "easy_apply": j.easy_apply,
+                "category":   j.category,
+            }
+            for j in jobs
+        ],
+    }
+
+
+# ── Scrape SSE ─────────────────────────────────────────────────────────────────
 
 def _sanitize_location(raw: str) -> str:
-    """Strip all characters except lowercase letters, digits, and hyphens."""
     return re.sub(r"[^a-z0-9\-]", "", raw.lower())[:50] or "winterthur"
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return _jinja.get_template("start.html").render()
 
 
 @app.get("/scrape")
 async def scrape_sse(
-    location: str = Query("winterthur"),
-    max_pages: int | None = Query(None, ge=1, le=500),
-) -> StreamingResponse:
+    location:  str           = Query("winterthur"),
+    max_pages: int | None    = Query(None, ge=1, le=500),
+    token:     str           = Query(...),
+    db:        AsyncSession  = Depends(get_db),
+):
+    # Validate JWT manually (EventSource cannot set headers)
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload["sub"])
+    except (JWTError, ValueError, KeyError):
+        async def _err():
+            yield f'event: error_msg\ndata: {json.dumps({"msg": "Invalid token"})}\n\n'
+        return StreamingResponse(_err(), media_type="text/event-stream")
+
     location = _sanitize_location(location)
 
-    async def event_stream():
-        if _run_lock.locked():
-            yield f"event: error_msg\ndata: {json.dumps({'msg': 'Scraper läuft bereits – bitte warten!'})}\n\n"
+    async def event_stream() -> Any:
+        if _get_scrape_lock().locked():
+            yield f'event: error_msg\ndata: {json.dumps({"msg": "Scraper läuft bereits – bitte warten!"})}\n\n'
             return
 
-        async with _run_lock:
-            progress_q: asyncio.Queue = asyncio.Queue()
-            result: dict = {}
-            error_occurred = False
+        async with _get_scrape_lock():
+            progress_queue: asyncio.Queue = asyncio.Queue()
 
-            def on_progress(event_type: str, **kwargs):
-                """Sync callback bridging the scraper thread to the async queue."""
-                asyncio.get_event_loop().call_soon_threadsafe(
-                    progress_q.put_nowait, (event_type, kwargs)
-                )
+            scrape_task = asyncio.create_task(
+                scrape_async(location, max_pages, progress_queue)
+            )
 
-            def run_scraper():
-                nonlocal error_occurred
-                try:
-                    raw_jobs = scrape(location, max_pages, progress_fn=on_progress)
-
-                    if not raw_jobs:
-                        progress_q.put_nowait(("error_msg", {"msg": "Keine Jobs gefunden"}))
-                        return
-
-                    ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    stem = f"jobs_{location}_{ts}"
-
-                    RAW_DIR.mkdir(parents=True, exist_ok=True)
-                    save_csv(raw_jobs,  RAW_DIR / f"{stem}.csv")
-                    save_json(raw_jobs, RAW_DIR / f"{stem}.json")
-
-                    filtered, stats = filter_jobs(raw_jobs, verbose=False,
-                                                  progress_fn=on_progress)
-
-                    on_progress("stage", stage="generating",
-                                remaining=len(filtered), excluded=0)
-
-                    FILT_DIR.mkdir(parents=True, exist_ok=True)
-                    save_json(filtered, FILT_DIR / f"{stem}_filtered.json")
-
-                    html_name = f"jobs_{location}_{ts}.html"
-                    generate_html(filtered, stats, location, FILT_DIR / html_name)
-
-                    easy_count = sum(1 for j in filtered if j.easy_apply)
-                    progress_q.put_nowait(("done", {
-                        "html_name": html_name,
-                        "stats":     stats.model_dump(),
-                        "easy_count": easy_count,
-                    }))
-
-                except Exception as exc:
-                    logger.exception("Scraper thread error")
-                    progress_q.put_nowait(("error_msg", {"msg": f"{type(exc).__name__}: {exc}"}))
-                finally:
-                    progress_q.put_nowait(("__sentinel__", {}))
-
-            t = threading.Thread(target=run_scraper, daemon=True)
-            t.start()
-
-            _PROGRESS_MAP = {
-                "found":       5,
-                "scrape_done": 62,
-            }
+            _PROGRESS_MAP = {"found": 5}
             _STAGE_PROGRESS = {
-                "workload":   65,
-                "keywords":   72,
-                "relevance":  78,
-                "dedup":      83,
-                "generating": 90,
+                "workload": 65, "keywords": 72, "relevance": 78, "dedup": 83,
             }
 
-            while True:
-                try:
-                    event_type, data = await asyncio.wait_for(progress_q.get(), timeout=25)
-                except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
-                    continue
+            # Drain progress events; stop when scrape_done sentinel arrives
+            try:
+                while True:
+                    try:
+                        event_type, data = await asyncio.wait_for(
+                            progress_queue.get(), timeout=25
+                        )
+                    except asyncio.TimeoutError:
+                        yield ": heartbeat\n\n"
+                        continue
 
-                if event_type == "__sentinel__":
-                    break
+                    if event_type == "scrape_done":
+                        # Internal sentinel — do not forward to browser
+                        break
 
-                # Attach progress percentage to data
-                if event_type == "page":
-                    page  = data.get("page", 1)
-                    total = data.get("total_pages", 1)
-                    data["progress"] = 5 + int(55 * page / max(total, 1))
-                elif event_type == "stage":
-                    data["progress"] = _STAGE_PROGRESS.get(data.get("stage", ""), 80)
-                else:
-                    data["progress"] = _PROGRESS_MAP.get(event_type, 0)
+                    # Attach progress %
+                    if event_type == "page":
+                        page  = data.get("page", 1)
+                        total = data.get("total_pages", 1)
+                        data["progress"] = 5 + int(55 * page / max(total, 1))
+                    elif event_type == "stage":
+                        data["progress"] = _STAGE_PROGRESS.get(data.get("stage", ""), 80)
+                    else:
+                        data["progress"] = _PROGRESS_MAP.get(event_type, 0)
 
-                yield f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                    yield f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-                if event_type in ("done", "error_msg"):
-                    break
+            except Exception as exc:
+                logger.exception("SSE drain error")
+                yield f'event: error_msg\ndata: {json.dumps({"msg": str(exc)})}\n\n'
+                scrape_task.cancel()
+                return
+
+            raw_jobs: list[Job] = await scrape_task
+
+            if not raw_jobs:
+                yield f'event: error_msg\ndata: {json.dumps({"msg": "Keine Jobs gefunden"})}\n\n'
+                return
+
+            # Build per-user filter profile
+            profile_result = await db.execute(
+                select(ProfileRow).where(ProfileRow.user_id == user_id)
+            )
+            profile = profile_result.scalar_one_or_none()
+            interests = profile.get_interests_list() if profile else []
+            filter_profile = FilterProfile(
+                min_workload=profile.min_workload if profile else None,
+                allow_quereinstieg=profile.allow_quereinstieg if profile else True,
+                include_keywords=interests if interests else None,
+            )
+
+            # Run synchronous filter pipeline off the event loop
+            loop = asyncio.get_running_loop()
+            try:
+                filtered, stats = await loop.run_in_executor(
+                    None, filter_jobs, raw_jobs, False, None, filter_profile
+                )
+            except Exception as exc:
+                logger.exception("Filter pipeline error")
+                yield f'event: error_msg\ndata: {json.dumps({"msg": f"Filter error: {exc}"})}\n\n'
+                return
+
+            # Persist to DB
+            easy_count  = sum(1 for j in filtered if j.easy_apply)
+            history_row = SearchHistoryRow(
+                user_id=user_id,
+                location=location,
+                total_count=stats.total,
+                kept_count=stats.kept,
+                easy_count=easy_count,
+            )
+            db.add(history_row)
+            await db.flush()
+
+            for job in filtered:
+                db.add(JobRow(
+                    search_id=history_row.id,
+                    uuid=job.uuid,
+                    title=job.title,
+                    company=job.company,
+                    company_clean=job.company_clean,
+                    location=job.location,
+                    workload=job.workload,
+                    contract_type=job.contract_type,
+                    published=job.published,
+                    is_promoted=job.is_promoted,
+                    easy_apply=job.easy_apply,
+                    url=job.url,
+                    category=job.category,
+                ))
+            await db.commit()
+
+            yield (
+                f'event: done\ndata: {json.dumps({"stats": stats.model_dump(), "easy_count": easy_count, "search_id": history_row.id})}\n\n'
+            )
 
     return StreamingResponse(
         event_stream(),
@@ -159,36 +369,33 @@ async def scrape_sse(
     )
 
 
-@app.get("/results/{filename:path}")
-async def serve_result(filename: str) -> FileResponse:
-    # Guard: only allow simple filenames (no path separators, must end in .html)
-    if not re.match(r"^[a-z0-9_\-]+\.html$", filename):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=403, detail="Zugriff verweigert")
+# ── Static files (React SPA) ───────────────────────────────────────────────────
 
-    filepath = FILT_DIR / filename
-    resolved = filepath.resolve()
+_assets_dir = DIST_DIR / "assets"
+if _assets_dir.exists():
+    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
-    # Guard against path traversal
-    if not str(resolved).startswith(str(FILT_DIR.resolve())):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=403, detail="Zugriff verweigert")
+# Mount public files (favicon, icons)
+for _fname in ("favicon.svg", "icons.svg"):
+    _fpath = DIST_DIR / _fname
+    if _fpath.exists():
+        @app.get(f"/{_fname}", include_in_schema=False)
+        async def _static_file(f=_fpath):
+            return FileResponse(f)
 
-    if not resolved.exists():
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Datei nicht gefunden")
 
-    return FileResponse(resolved, media_type="text/html")
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_spa(full_path: str) -> FileResponse:
+    index = DIST_DIR / "index.html"
+    if not index.exists():
+        raise HTTPException(status_code=503, detail="Frontend not built. Run: cd frontend && npm run build")
+    return FileResponse(index)
 
+
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def start() -> None:
-    """Entry point for the `jobscraper-web` console script."""
-    port = 5001
-    url  = f"http://localhost:{port}"
-    logger.info("JobScraper web UI starting at {}", url)
-    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
-
-
-if __name__ == "__main__":
-    start()
+    import uvicorn
+    port = int(os.getenv("PORT", "5001"))
+    logger.info("JobScraper starting on port {}", port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
