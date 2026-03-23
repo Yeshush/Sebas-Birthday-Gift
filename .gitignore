@@ -14,7 +14,8 @@ filtered_results/
 !package-lock.json
 !frontend/package.json
 !frontend/package-lock.json
-*.html
+/*.html
+!frontend/index.html
 
 # macOS
 .DS_Store
