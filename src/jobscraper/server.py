@@ -159,6 +159,41 @@ async def me(
     }
 
 
+@app.put("/api/profile")
+async def update_profile(
+    request: Request,
+    current_user: Annotated[UserRow, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+):
+    body = await request.json()
+    result = await db.execute(
+        select(ProfileRow).where(ProfileRow.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        profile = ProfileRow(user_id=current_user.id)
+        db.add(profile)
+
+    if "education_level" in body:
+        profile.education_level = (body["education_level"] or "").strip() or None
+    if "min_workload" in body:
+        profile.min_workload = max(0, min(100, int(body["min_workload"])))
+    if "interests" in body:
+        cleaned = [s.strip().lower() for s in body["interests"] if s.strip()]
+        profile.interests = json.dumps(cleaned)
+    if "allow_quereinstieg" in body:
+        profile.allow_quereinstieg = bool(body["allow_quereinstieg"])
+
+    await db.commit()
+    await db.refresh(profile)
+    return {
+        "education_level": profile.education_level,
+        "min_workload":    profile.min_workload,
+        "interests":       profile.get_interests_list(),
+        "allow_quereinstieg": profile.allow_quereinstieg,
+    }
+
+
 # ── History routes ─────────────────────────────────────────────────────────────
 
 @app.get("/api/history")
@@ -311,10 +346,19 @@ async def scrape_sse(
                 )
                 profile = profile_result.scalar_one_or_none()
                 interests = profile.get_interests_list() if profile else []
+
+                # Derive keyword from EFZ field (e.g. "Detailhandel EFZ" → "detailhandel")
+                efz_kw: list[str] = []
+                if profile and profile.education_level:
+                    efz_field = re.sub(r"\befz\b", "", profile.education_level, flags=re.IGNORECASE).strip().lower()
+                    if efz_field and efz_field not in interests:
+                        efz_kw = [efz_field]
+
+                include_kw = efz_kw + interests
                 filter_profile = FilterProfile(
                     min_workload=profile.min_workload if profile else None,
                     allow_quereinstieg=profile.allow_quereinstieg if profile else True,
-                    include_keywords=interests if interests else None,
+                    include_keywords=include_kw if include_kw else None,
                 )
 
             # Run synchronous filter pipeline off the event loop

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 
@@ -14,6 +14,160 @@ const CATEGORIES = [
 ];
 
 const CAT_MAP = Object.fromEntries(CATEGORIES.map(c => [c.key, c]));
+
+/* ── Tag input component ───────────────────────── */
+function TagInput({ tags, onChange }) {
+  const [input, setInput] = useState('');
+  const inputRef = useRef(null);
+
+  const addTag = (raw) => {
+    const val = raw.trim().toLowerCase();
+    if (val && !tags.includes(val)) {
+      onChange([...tags, val]);
+    }
+    setInput('');
+  };
+
+  const removeTag = (tag) => onChange(tags.filter(t => t !== tag));
+
+  const handleKey = (e) => {
+    if ((e.key === 'Enter' || e.key === ',') && input.trim()) {
+      e.preventDefault();
+      addTag(input);
+    } else if (e.key === 'Backspace' && !input && tags.length) {
+      removeTag(tags[tags.length - 1]);
+    }
+  };
+
+  return (
+    <div className="tag-editor" onClick={() => inputRef.current?.focus()}>
+      {tags.map(tag => (
+        <span key={tag} className="tag-chip">
+          {tag}
+          <button className="tag-remove" onClick={(e) => { e.stopPropagation(); removeTag(tag); }} type="button">
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        ref={inputRef}
+        className="tag-input-field"
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        onKeyDown={handleKey}
+        onBlur={() => input.trim() && addTag(input)}
+        placeholder={tags.length ? '' : 'Stichwort eingeben + Enter'}
+      />
+    </div>
+  );
+}
+
+/* ── Profile editor modal ──────────────────────── */
+function ProfileEditor({ profile, onSave, onClose }) {
+  const [educationLevel, setEducationLevel] = useState(profile.education_level || '');
+  const [minWorkload,    setMinWorkload]    = useState(profile.min_workload ?? 80);
+  const [interests,      setInterests]      = useState([...(profile.interests || [])]);
+  const [allowQuer,      setAllowQuer]      = useState(profile.allow_quereinstieg ?? true);
+  const [saving,         setSaving]         = useState(false);
+  const [error,          setError]          = useState('');
+
+  // close on Escape
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const token = localStorage.getItem('token');
+      const res = await axios.put('/api/profile', {
+        education_level:    educationLevel,
+        min_workload:       minWorkload,
+        interests,
+        allow_quereinstieg: allowQuer,
+      }, { headers: { Authorization: `Bearer ${token}` } });
+      onSave(res.data);
+    } catch {
+      setError('Speichern fehlgeschlagen. Bitte erneut versuchen.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal-card">
+        <div className="modal-header">
+          <h3 className="modal-title">Profil bearbeiten</h3>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="editor-body">
+          {/* EFZ field */}
+          <div className="editor-field">
+            <label className="editor-label">EFZ Ausbildungsfeld</label>
+            <p className="editor-hint">z.B. «Detailhandel», «Koch», «Kaufmann» — wird automatisch als Suchbegriff verwendet</p>
+            <input
+              className="editor-input"
+              type="text"
+              value={educationLevel}
+              onChange={e => setEducationLevel(e.target.value)}
+              placeholder="z.B. Detailhandel EFZ"
+            />
+          </div>
+
+          {/* Min workload */}
+          <div className="editor-field">
+            <label className="editor-label">Minimales Pensum</label>
+            <div className="workload-row">
+              <input
+                className="workload-range"
+                type="range"
+                min={10}
+                max={100}
+                step={10}
+                value={minWorkload}
+                onChange={e => setMinWorkload(Number(e.target.value))}
+              />
+              <span className="workload-value">{minWorkload}%</span>
+            </div>
+          </div>
+
+          {/* Quereinstieg */}
+          <div className="editor-field">
+            <label className="editor-label">Quereinstieg</label>
+            <div className="toggle-row">
+              <span className="toggle-desc">Jobs für Quereinsteiger einschliessen</span>
+              <label className="toggle-switch">
+                <input type="checkbox" checked={allowQuer} onChange={e => setAllowQuer(e.target.checked)} />
+                <span className="toggle-track" />
+              </label>
+            </div>
+          </div>
+
+          {/* Interests */}
+          <div className="editor-field">
+            <label className="editor-label">Interessen / Stichwörter</label>
+            <p className="editor-hint">Enter oder Komma zum Hinzufügen, × zum Entfernen</p>
+            <TagInput tags={interests} onChange={setInterests} />
+          </div>
+
+          {error && <p className="login-error">{error}</p>}
+
+          <div className="editor-actions">
+            <button className="btn-cancel" onClick={onClose}>Abbrechen</button>
+            <button className="btn-save" onClick={handleSave} disabled={saving}>
+              {saving ? 'Speichern…' : 'Speichern →'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ── Single job card ───────────────────────────── */
 function JobCard({ job, idx }) {
@@ -80,22 +234,23 @@ function CategorySection({ catKey, jobs }) {
 
 /* ── Dashboard ─────────────────────────────────── */
 export default function Dashboard() {
-  const [user,       setUser]       = useState(null);
-  const [location,   setLocation]   = useState('winterthur');
-  const [maxPages,   setMaxPages]   = useState('');
-  const [scraping,   setScraping]   = useState(false);
-  const [progress,   setProgress]   = useState(0);
-  const [statusMsg,  setStatusMsg]  = useState('');
-  const [results,    setResults]    = useState(null);
-  const [activeTab,  setActiveTab]  = useState('scrape');
-  const [history,    setHistory]    = useState([]);
-  const [jobsList,   setJobsList]   = useState(null);
-  const [isDark,     setIsDark]     = useState(false);
-  const [catFilter,  setCatFilter]  = useState('all');
-  const [jobSearch,  setJobSearch]  = useState('');
+  const [user,        setUser]        = useState(null);
+  const [location,    setLocation]    = useState('winterthur');
+  const [maxPages,    setMaxPages]    = useState('');
+  const [scraping,    setScraping]    = useState(false);
+  const [progress,    setProgress]    = useState(0);
+  const [statusMsg,   setStatusMsg]   = useState('');
+  const [results,     setResults]     = useState(null);
+  const [activeTab,   setActiveTab]   = useState('scrape');
+  const [history,     setHistory]     = useState([]);
+  const [jobsList,    setJobsList]    = useState(null);
+  const [isDark,      setIsDark]      = useState(false);
+  const [catFilter,   setCatFilter]   = useState('all');
+  const [jobSearch,   setJobSearch]   = useState('');
+  const [editProfile, setEditProfile] = useState(false);
   const navigate = useNavigate();
 
-  /* sync dark mode from localStorage */
+  /* dark mode from localStorage */
   useEffect(() => {
     const saved = localStorage.getItem('darkMode') === 'true';
     setIsDark(saved);
@@ -203,6 +358,11 @@ export default function Dashboard() {
     navigate('/');
   };
 
+  const handleProfileSaved = (updatedProfile) => {
+    setUser(prev => ({ ...prev, profile: updatedProfile }));
+    setEditProfile(false);
+  };
+
   /* filter + group jobs */
   const filteredJobs = useMemo(() => {
     if (!jobsList) return [];
@@ -243,6 +403,15 @@ export default function Dashboard() {
   return (
     <div className="app">
 
+      {/* ── Profile editor modal ─────────────── */}
+      {editProfile && (
+        <ProfileEditor
+          profile={user.profile}
+          onSave={handleProfileSaved}
+          onClose={() => setEditProfile(false)}
+        />
+      )}
+
       {/* ── Header ─────────────────────────────── */}
       <header className="site-header">
         <div className="header-inner">
@@ -274,7 +443,7 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* ── Stats strip (after scrape) ──────────── */}
+      {/* ── Stats strip ────────────────────────── */}
       {results && !scraping && (
         <div className="stats-strip">
           <div className="strip-stat">
@@ -371,6 +540,9 @@ export default function Dashboard() {
                   </div>
                 </div>
               )}
+              <button className="edit-profile-btn" onClick={() => setEditProfile(true)}>
+                ✏ Profil bearbeiten
+              </button>
             </aside>
 
             {/* Form + status */}
@@ -491,7 +663,6 @@ export default function Dashboard() {
                   </span>
                 </div>
 
-                {/* grouped by category when "Alle" + no search */}
                 {groupedJobs ? (
                   groupedJobs.length === 0 ? (
                     <p className="empty-grid">Keine Stellen gefunden.</p>
@@ -501,7 +672,6 @@ export default function Dashboard() {
                     ))
                   )
                 ) : (
-                  /* flat grid for category/search filter */
                   <div className="jobs-grid">
                     {filteredJobs.map((job, idx) => (
                       <JobCard key={job.uuid || idx} job={job} idx={idx} />

@@ -847,6 +847,274 @@ body.dark-mode .badge-promoted { background: #251E08; color: #FFB74D; border-col
 .footer-note { font-size: 0.73rem; color: var(--text-3); letter-spacing: 0.06em; }
 
 /* ─────────────────────────────────────────────
+   PROFILE EDITOR MODAL
+───────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(26, 21, 16, 0.55);
+  backdrop-filter: blur(3px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  animation: fadeIn 0.2s ease forwards;
+}
+
+body.dark-mode .modal-overlay { background: rgba(0, 0, 0, 0.7); }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.modal-card {
+  background: var(--card-bg);
+  border: 1px solid var(--mist);
+  border-radius: 2px;
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: slideUp 0.25s ease forwards;
+  transition: background 0.35s, border-color 0.35s;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 1.75rem 1.75rem 0;
+  margin-bottom: 1.5rem;
+}
+
+.modal-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.modal-close {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  color: var(--text-2);
+  padding: 0.2rem 0.4rem;
+  border-radius: 2px;
+  transition: color 0.2s;
+  font-family: 'DM Sans', sans-serif;
+}
+.modal-close:hover { color: var(--ink); }
+
+.editor-body { padding: 0 1.75rem 1.75rem; display: flex; flex-direction: column; gap: 1.5rem; }
+
+.editor-field { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.editor-label {
+  font-size: 0.64rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--rust);
+  font-weight: 500;
+}
+
+.editor-hint {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  margin-top: -0.25rem;
+}
+
+.editor-input {
+  padding: 0.65rem 0.9rem;
+  border: 1px solid var(--mist);
+  background: var(--cream);
+  border-radius: 2px;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.9rem;
+  color: var(--ink);
+  outline: none;
+  transition: border-color 0.2s, background 0.35s, color 0.35s;
+}
+.editor-input:focus { border-color: var(--rust); }
+
+/* workload row */
+.workload-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.workload-range {
+  flex: 1;
+  accent-color: var(--rust);
+  cursor: pointer;
+}
+.workload-value {
+  font-family: 'Fraunces', serif;
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--rust);
+  min-width: 3.5rem;
+  text-align: right;
+  letter-spacing: -0.02em;
+}
+
+/* quereinstieg toggle */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.toggle-desc { font-size: 0.84rem; color: var(--text-2); }
+
+.toggle-switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: var(--mist);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.toggle-switch input:checked + .toggle-track { background: var(--rust); }
+.toggle-track::before {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 3px;
+  top: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.toggle-switch input:checked + .toggle-track::before { transform: translateX(18px); }
+
+/* tag editor */
+.tag-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.6rem;
+  border: 1px solid var(--mist);
+  border-radius: 2px;
+  background: var(--cream);
+  min-height: 2.8rem;
+  align-items: center;
+  transition: border-color 0.2s, background 0.35s;
+  cursor: text;
+}
+.tag-editor:focus-within { border-color: var(--rust); }
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.22rem 0.55rem 0.22rem 0.65rem;
+  background: var(--sand);
+  border: 1px solid var(--mist);
+  border-radius: 100px;
+  font-size: 0.76rem;
+  color: var(--ink);
+  transition: background 0.35s;
+}
+
+.tag-remove {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 0.85rem;
+  padding: 0;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+.tag-remove:hover { color: var(--rust); }
+
+.tag-input-field {
+  border: none;
+  background: transparent;
+  outline: none;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.84rem;
+  color: var(--ink);
+  min-width: 80px;
+  flex: 1;
+  padding: 0.1rem 0.2rem;
+}
+.tag-input-field::placeholder { color: var(--text-3); }
+
+/* save / cancel */
+.editor-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--mist);
+  margin-top: 0.5rem;
+}
+
+.btn-save {
+  padding: 0.6rem 1.4rem;
+  background: var(--ink);
+  color: var(--cream);
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  transition: background 0.2s;
+}
+.btn-save:hover { background: var(--rust); }
+.btn-save:disabled { opacity: 0.5; cursor: default; }
+
+.btn-cancel {
+  padding: 0.6rem 1.1rem;
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--mist);
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.82rem;
+  transition: all 0.2s;
+}
+.btn-cancel:hover { background: var(--sand); color: var(--ink); }
+
+.edit-profile-btn {
+  margin-top: 1.25rem;
+  width: 100%;
+  padding: 0.5rem;
+  background: transparent;
+  color: var(--rust);
+  border: 1px dashed var(--mist);
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 0.76rem;
+  letter-spacing: 0.06em;
+  transition: all 0.2s;
+}
+.edit-profile-btn:hover { border-color: var(--rust); background: var(--sand); }
+
+/* ─────────────────────────────────────────────
    LOGIN PAGE
 ───────────────────────────────────────────── */
 .login-page {
